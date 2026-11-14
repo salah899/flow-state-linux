@@ -1,0 +1,4023 @@
+# Flow State - full project source
+# Generated: 2026-11-14 16:50
+
+## File tree
+./.gitignore
+./README.md
+./docs/ARCHITECTURE.md
+./docs/CHANGELOG.md
+./docs/history/AUDIT_REPORT.md
+./docs/history/BUG_REPORT_FINAL.md
+./docs/history/REGRESSION_REPORT.md
+./pytest.ini
+./requirements-dev.txt
+./requirements.txt
+./scripts/build.sh
+./scripts/dump_project.sh
+./scripts/run.sh
+./scripts/setup.sh
+./scripts/test.sh
+./src/flow_state/__init__.py
+./src/flow_state/__main__.py
+./src/flow_state/app.py
+./src/flow_state/core/__init__.py
+./src/flow_state/core/scoring.py
+./src/flow_state/core/timer.py
+./src/flow_state/data/__init__.py
+./src/flow_state/data/database.py
+./src/flow_state/data/migrations/001_initial.py
+./src/flow_state/data/migrations/002_subtasks.py
+./src/flow_state/data/migrations/__init__.py
+./src/flow_state/i18n/__init__.py
+./src/flow_state/i18n/locales/__init__.py
+./src/flow_state/i18n/locales/ar.py
+./src/flow_state/i18n/locales/de.py
+./src/flow_state/i18n/locales/en.py
+./src/flow_state/i18n/locales/es.py
+./src/flow_state/i18n/locales/fr.py
+./src/flow_state/i18n/locales/it.py
+./src/flow_state/i18n/locales/ja.py
+./src/flow_state/i18n/locales/ko.py
+./src/flow_state/i18n/locales/pt.py
+./src/flow_state/i18n/locales/ru.py
+./src/flow_state/i18n/locales/tr.py
+./src/flow_state/i18n/locales/zh.py
+./src/flow_state/paths.py
+./src/flow_state/services/__init__.py
+./src/flow_state/services/analytics_service.py
+./src/flow_state/services/focus_service.py
+./src/flow_state/services/folder_service.py
+./src/flow_state/services/settings_service.py
+./src/flow_state/services/task_service.py
+./src/flow_state/ui/__init__.py
+./src/flow_state/ui/dialogs/__init__.py
+./src/flow_state/ui/dialogs/choose_task_dialog.py
+./src/flow_state/ui/dialogs/settings_dialog.py
+./src/flow_state/ui/dialogs/task_edit_dialog.py
+./src/flow_state/ui/formatting.py
+./src/flow_state/ui/main_window.py
+./src/flow_state/ui/pages/__init__.py
+./src/flow_state/ui/pages/analytics_page.py
+./src/flow_state/ui/pages/calendar_page.py
+./src/flow_state/ui/pages/home_page.py
+./src/flow_state/ui/theme.py
+./src/flow_state/ui/tray.py
+./src/flow_state/ui/widgets/__init__.py
+./src/flow_state/ui/widgets/charts.py
+./src/flow_state/ui/widgets/folder_panel.py
+./src/flow_state/ui/widgets/task_list.py
+./src/flow_state/ui/widgets/timer_ring.py
+./tests/conftest.py
+./tests/test_database.py
+./tests/test_i18n.py
+./tests/test_scoring.py
+./tests/test_services.py
+./tests/test_timer.py
+
+===== FILE: ./.gitignore =====
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.pytest_cache/
+
+===== FILE: ./README.md =====
+# Flow State
+
+Linux desktop Pomodoro + task manager — Python, PySide6, SQLite.
+
+## Quick start
+```bash
+./scripts/setup.sh      # once: creates .venv, installs PySide6 + pytest + pyinstaller
+./scripts/run.sh        # start the app
+./scripts/test.sh       # run tests (do this before every increment)
+./scripts/build.sh      # tests + standalone ./dist/FlowState
+./scripts/dump_project.sh   # regenerate PROJECT_SOURCE.txt (whole project in one .txt)
+```
+Manual run: `PYTHONPATH=src python -m flow_state`
+
+Your data stays in `~/.local/share/flow-state/data.db` (unchanged from v1).
+Old databases are upgraded automatically and safely by versioned migrations.
+
+## Layout
+```
+src/flow_state/
+├── __main__.py / app.py     entry point
+├── paths.py                 data dir + bundled resources
+├── core/                    pure logic (no DB, no widgets)
+│   ├── timer.py             PomodoroTimer
+│   └── scoring.py           ★ calculation & reward rules
+├── data/                    SQL only
+│   ├── database.py
+│   └── migrations/          ★ 001_initial, 002_subtasks, ...
+├── services/                business layer — the ONLY thing the UI calls
+│   ├── task_service.py      ★ includes subtasks API
+│   ├── focus_service.py
+│   ├── analytics_service.py
+│   ├── folder_service.py
+│   └── settings_service.py
+├── i18n/
+│   ├── __init__.py          tr(), translate_tree()
+│   └── locales/             ★ one file per language (auto-discovered)
+├── ui/
+│   ├── main_window.py  tray.py  theme.py  formatting.py
+│   ├── pages/               home, analytics, calendar
+│   ├── widgets/             task_list, folder_panel, charts, timer_ring
+│   └── dialogs/             task_edit, settings, choose_task
+└── resources/bell.wav
+tests/                       pytest (no display needed except test_timer)
+docs/                        architecture guide + history reports
+```
+★ = extension points. See **docs/ARCHITECTURE.md** for step-by-step recipes.
+
+===== FILE: ./docs/ARCHITECTURE.md =====
+# Flow State — Architecture & Extension Guide
+
+## Layers (dependencies point DOWN only)
+```
+ui  ──►  services  ──►  data (database + migrations)
+ │           │
+ └──► core ◄─┘          core = timer + scoring (no SQL, no widgets)
+i18n is used by ui only.
+```
+Rules
+1. Widgets never import `Database` and never write SQL. They receive one
+   `AppServices` object (`services.tasks`, `.focus`, `.analytics`, `.folders`, `.settings`).
+2. `database.py` contains SQL only — no percentages, no rewards, no Qt.
+3. Every number shown to the user (rewards, rates, remaining time) comes from
+   `core/scoring.py`.
+4. Schema changes are new migration files; released migrations are never edited.
+5. Each increment ends with `./scripts/test.sh` green.
+
+---
+
+## Recipe 1 — Add a language (≈10 minutes, zero code changes)
+1. `cp src/flow_state/i18n/locales/fr.py src/flow_state/i18n/locales/nl.py`
+2. Edit the header:
+   ```python
+   CODE = 'nl'; NAME = 'Nederlands'; RTL = False; QT_LOCALE = 'nl_NL'; ORDER = 12
+   ```
+   (`RTL = True` for Hebrew, Persian, Urdu …)
+3. Translate the values of `MESSAGES` (keys are the English strings in `en.py`).
+4. `./scripts/test.sh -s` — `test_report_missing_translations` prints what is still missing
+   (missing keys fall back to English, never Arabic).
+The language appears in Settings automatically.
+
+New UI text? Write it in Arabic in the code, add `'arabic': 'English'` to `en.py`,
+then add the English key to the other language files.
+
+---
+
+## Recipe 2 — Subtasks (data layer is READY)
+Already done in this version:
+- Migration `002_subtasks.py` adds `tasks.parent_id` (+ `position` for ordering).
+- Deleting a parent deletes its subtasks and their focus history.
+- Main lists / analytics show top-level tasks only.
+- API: `services.tasks.add_subtask(parent_id, title)`, `.subtasks(parent_id)`,
+  `.subtask_progress(parent_id) -> (done, total)`.
+- Tests: `tests/test_services.py::test_subtasks_are_hidden_from_main_list`.
+
+Next increment (UI only):
+1. `ui/widgets/subtask_list.py` — small checklist widget (QListWidget with checkboxes)
+   using `services.tasks.subtasks / add_subtask / set_completed / delete`.
+2. Put it inside `ui/dialogs/task_edit_dialog.py` (only when editing an existing task).
+3. In `ui/widgets/task_list.py` show `done/total` next to the title
+   using `subtask_progress`.
+4. Add the Arabic strings to `en.py` and other locales.
+5. Optional rule: auto-complete the parent when all subtasks are done →
+   implement in `TaskService.set_completed`, never in the widget.
+
+---
+
+## Recipe 3 — Change the calculation / reward system
+All rules live in `core/scoring.py`:
+
+| Method | Controls |
+|---|---|
+| `session_fraction(elapsed, full)` | how much of a session counts when you press Finish |
+| `reward_for(fraction)` | 🍅 added to the task (`completed_sessions`) |
+| `evaluate_session(...)` | fraction + real focus seconds + reward together |
+| `task_rate`, `time_rate`, `remaining_minutes`, `estimated_minutes` | analytics cards & donut |
+
+Steps:
+1. Subclass `ScoringPolicy`, give it a unique `name`, override what you need.
+   Example already included: `FullSessionsOnlyPolicy` (only a full session earns 🍅).
+2. Register it in `POLICIES`.
+3. Add it to `SCORING_CHOICES` in `ui/dialogs/settings_dialog.py` (+ translations).
+4. Add tests in `tests/test_scoring.py`.
+
+The user picks the policy in Settings → "نظام الحساب" (saved as `scoring_policy`).
+Focus history (`focus_sessions.focus_seconds`) always stores REAL time, so
+changing the reward rule never corrupts time statistics.
+
+Ideas for later: XP / levels / streaks → new table via a migration
+(`003_rewards.py`), a `RewardService`, and `ScoringPolicy.xp_for(result)`.
+
+---
+
+## Recipe 4 — Change the database schema
+1. Create `data/migrations/003_<name>.py` with `VERSION = 3` and `upgrade(conn)`.
+2. Append `"003_<name>"` to `_MODULES` in `data/migrations/__init__.py`.
+3. Add SQL methods in `database.py`, logic in a service, then UI.
+4. Add a test that upgrades an old database (see `tests/test_database.py`).
+
+---
+
+## Sharing the project as one text file
+`./scripts/dump_project.sh` writes `PROJECT_SOURCE.txt` with the file tree and every
+source file separated by `===== FILE: path =====` lines.
+
+===== FILE: ./docs/CHANGELOG.md =====
+# Changelog
+
+## 2.0.0 — Restructure
+- New package layout `src/flow_state/` (core / data / services / i18n / ui).
+- UI talks only to services; SQL removed from widgets.
+- Versioned migrations with `PRAGMA user_version`; v1 databases upgrade automatically.
+- Scoring policy (`core/scoring.py`) + Settings option "نظام الحساب".
+- Subtasks data layer (`parent_id`) + service API (UI is the next increment).
+- One file per language, auto-discovered.
+- `TaskEditDialog`, `HomePage`, `ChooseTaskDialog`, formatting helpers split into own files.
+- Removed unused `stats_panel.py`, unused tags code paths, unused `resources.qrc`.
+- Fixed: folder delete dialog had mixed Arabic/English text.
+- Fixed: `build.sh` now bundles all modules and runs tests first.
+- Added pytest suite (scoring, migrations, services, i18n, timer).
+- Added `scripts/dump_project.sh` → `PROJECT_SOURCE.txt`.
+
+===== FILE: ./docs/history/AUDIT_REPORT.md =====
+# Flow State: Technical Audit Report (v1)
+
+## Implemented
+- Renamed the complete product identity from Focus To-Do to Flow State.
+- Added 12 selectable languages: Arabic, English, French, German, Spanish, Italian, Portuguese, Turkish, Russian, Simplified Chinese, Japanese, and Korean.
+- Arabic uses RTL; all other included languages use LTR.
+- Added dark-mode styling for date/time editors and their controls.
+- Added theme-aware checkbox indicators for checked, unchecked, hover, and disabled states.
+- Preserved Light, Dark, and System appearance modes.
+
+## Fixed bugs
+1. White date and time fields in Dark Mode: fixed by styling QDateEdit, QTimeEdit, and QDateTimeEdit.
+2. White native checkboxes in Dark Mode: fixed with theme-aware indicators.
+3. Inconsistent product name across window, app metadata, tray, README, and build instructions: centralized under Flow State naming.
+4. Western languages previously inherited RTL: language selection now updates direction.
+5. Historical focus duration accuracy: new sessions use recorded focus seconds instead of recalculating from a later timer duration.
+6. Existing completed tasks without completion timestamps: migrated safely with an initial timestamp so analytics do not fail.
+
+## Known limitations
+- Historical sessions created before focus_sessions existed cannot be assigned to their true original dates because that information was never stored.
+- A packaged build must be created on its target OS. Linux builds do not produce native Windows or macOS binaries.
+- Translation is runtime UI localization. User-created task and folder names are intentionally not translated.
+
+## Supported desktop targets
+- Linux: current primary target (Ubuntu, Debian, Linux Mint, openSUSE, ...).
+- Windows: Windows 10 and Windows 11.
+- macOS: macOS 13 or later, Intel and Apple Silicon.
+
+===== FILE: ./docs/history/BUG_REPORT_FINAL.md =====
+# Flow State Final Bug Report (v1)
+
+## Fixed
+- Replaced translation-over-translation behavior with canonical source recovery, so repeated language switches work.
+- Expanded translation coverage for every Arabic UI literal. User-created task and folder names remain untouched.
+- Added runtime retranslation after task-list, analytics, calendar, and dashboard refreshes.
+- Full Dark Mode styling for combo boxes, including popup lists, selected rows, dropdown areas, disabled state, and text colors.
+- Calendar: active tasks appear throughout their scheduled range; completed tasks appear only on completed_at.
+- Elapsed-time analytics use all actual focus_seconds. Remaining time and rate use only focus tied to estimated tasks.
+- Removed misleading backfill of old sessions and old completion dates.
+
+## Data limitation
+Sessions recorded before focus_sessions existed have no trustworthy day. They remain in task totals but are absent from daily history.
+
+## Regression tests (now automated in tests/)
+- Repeated en > fr > de > ja switching.
+- Completed task shown only on completion day; active task across its range.
+- Actual focus includes unestimated tasks; rate and remaining use estimated tasks only.
+
+===== FILE: ./docs/history/REGRESSION_REPORT.md =====
+# Flow State Regression Report (v1)
+
+## Fixed in this build
+- The running-state label is translated at the moment it is generated.
+- Folder-button text remains in the selected UI language after toggling the folder panel.
+- Priority cell values are translated when each row is built; task/folder names stay unchanged.
+- Date ranges, editor date patterns and 12/24-hour display follow the selected language locale.
+- Deleting a task deletes its focus-session history; deleting a folder deletes history for all its tasks.
+- Reopening a completed task clears its completion date.
+
+## Statistics interaction test
+(Automated as tests/test_services.py::test_statistics_scenario_from_regression_report)
+Expected final state after deleting the unestimated task:
+- Total tasks 1, completed 1, completion rate 100%
+- Total estimated 100 min, elapsed 25 min, remaining 75 min, time rate 25%
+- Weekly focus 1500 seconds. After deleting the final task everything returns to zero.
+
+===== FILE: ./pytest.ini =====
+[pytest]
+testpaths = tests
+pythonpath = src
+
+===== FILE: ./requirements-dev.txt =====
+-r requirements.txt
+pytest>=8.0
+pyinstaller>=6.0
+
+===== FILE: ./requirements.txt =====
+PySide6>=6.6
+
+===== FILE: ./scripts/build.sh =====
+#!/usr/bin/env bash
+# Builds a standalone executable with PyInstaller. Run ./scripts/setup.sh first.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+if [ ! -d .venv ]; then
+    echo "No virtual environment found. Run ./scripts/setup.sh first." >&2
+    exit 1
+fi
+. .venv/bin/activate
+python -m pytest -q
+pyinstaller \
+  --noconfirm \
+  --name FlowState \
+  --onefile \
+  --windowed \
+  --paths src \
+  --collect-submodules flow_state \
+  --add-data "src/flow_state/resources/bell.wav:flow_state/resources" \
+  src/flow_state/__main__.py
+echo "Build complete: ./dist/FlowState"
+
+===== FILE: ./scripts/dump_project.sh =====
+#!/usr/bin/env bash
+# Writes the whole project source into ONE text file: PROJECT_SOURCE.txt
+# (useful to share the project where .zip uploads are not accepted).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+OUT="PROJECT_SOURCE.txt"
+{
+  echo "# Flow State - full project source"
+  echo "# Generated: $(date '+%Y-%m-%d %H:%M')"
+  echo
+  echo "## File tree"
+  find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.md" -o -name "*.txt" -o -name "*.ini" -o -name ".gitignore" \) \
+    -not -path "./.venv/*" -not -path "*/__pycache__/*" -not -path "./build/*" -not -path "./dist/*" \
+    -not -name "$OUT" | sort
+  find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.md" -o -name "*.txt" -o -name "*.ini" -o -name ".gitignore" \) \
+    -not -path "./.venv/*" -not -path "*/__pycache__/*" -not -path "./build/*" -not -path "./dist/*" \
+    -not -name "$OUT" | sort | while read -r f; do
+      printf '\n===== FILE: %s =====\n' "$f"
+      cat "$f"
+  done
+} > "$OUT"
+echo "Wrote $OUT ($(wc -l < "$OUT") lines)"
+
+===== FILE: ./scripts/run.sh =====
+#!/usr/bin/env bash
+# Everyday launcher.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+if [ ! -d .venv ]; then
+    echo "No virtual environment found. Run ./scripts/setup.sh first." >&2
+    exit 1
+fi
+. .venv/bin/activate
+PYTHONPATH=src exec python -m flow_state "$@"
+
+===== FILE: ./scripts/setup.sh =====
+#!/usr/bin/env bash
+# One-time setup: creates .venv and installs runtime + dev dependencies.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+echo "Setup complete. Use ./scripts/run.sh to start Flow State."
+
+===== FILE: ./scripts/test.sh =====
+#!/usr/bin/env bash
+# Run the test suite (run before every increment / release).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+. .venv/bin/activate
+python -m pytest -q "$@"
+
+===== FILE: ./src/flow_state/__init__.py =====
+"""Flow State - Pomodoro task manager (PySide6 + SQLite)."""
+__version__ = "2.0.0"
+APP_NAME = "Flow State"
+
+===== FILE: ./src/flow_state/__main__.py =====
+from flow_state.app import main
+
+if __name__ == "__main__":
+    main()
+
+===== FILE: ./src/flow_state/app.py =====
+import sys
+
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+
+from flow_state import APP_NAME
+from flow_state.data.database import Database
+from flow_state.i18n import set_language
+from flow_state.services import AppServices
+from flow_state.ui.main_window import MainWindow
+from flow_state.ui.theme import apply_theme
+from flow_state.ui.tray import TrayController
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+    app.setQuitOnLastWindowClosed(not tray_available)
+
+    services = AppServices(Database())
+    settings = services.settings.all()
+    set_language(settings.get("language", "ar"))
+    apply_theme(app, settings.get("theme_mode", "system"))
+
+    window = MainWindow(services)
+    window.show()
+    if tray_available:
+        window.tray_controller = TrayController(window, window.timer)
+        window.tray_controller.show()
+    sys.exit(app.exec())
+
+===== FILE: ./src/flow_state/core/__init__.py =====
+
+===== FILE: ./src/flow_state/core/scoring.py =====
+"""Calculation & reward rules for Flow State.
+
+Every number the app shows about progress comes from ONE policy object.
+To change how progress / rewards are computed, subclass ScoringPolicy
+(or edit DefaultScoringPolicy) and register it in get_policy().
+No UI or database code needs to change.
+"""
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SessionResult:
+    """Outcome of one focus period, produced by the policy."""
+    fraction: float        # part of a full work session (0..1), 2 decimals
+    focus_seconds: int     # real focused seconds to store in history
+    reward: float          # what is added to task.completed_sessions (🍅)
+
+
+class ScoringPolicy:
+    """Base policy. Override any method to change the rules."""
+
+    name = "base"
+
+    # ---- focus sessions -------------------------------------------------
+    def session_fraction(self, elapsed_seconds: float, full_seconds: float) -> float:
+        if full_seconds <= 0:
+            return 0.0
+        return round(max(0.0, min(1.0, elapsed_seconds / full_seconds)), 2)
+
+    def evaluate_session(self, fraction: float, work_seconds: int) -> SessionResult:
+        fraction = round(max(0.0, min(1.0, float(fraction))), 2)
+        seconds = max(0, round(fraction * work_seconds))
+        return SessionResult(fraction, seconds, self.reward_for(fraction))
+
+    def reward_for(self, fraction: float) -> float:
+        """Tomatoes earned for a session. Default: proportional."""
+        return round(fraction, 2)
+
+    # ---- analytics ------------------------------------------------------
+    @staticmethod
+    def percent(part: float, whole: float) -> int:
+        return min(100, round(part * 100 / whole)) if whole else 0
+
+    def task_rate(self, done: int, total: int) -> int:
+        return self.percent(done, total)
+
+    def estimated_minutes(self, estimated_sessions: float, work_minutes: int) -> float:
+        return float(estimated_sessions or 0) * work_minutes
+
+    def remaining_minutes(self, total_minutes: float, elapsed_estimated_minutes: float) -> float:
+        return max(0.0, total_minutes - elapsed_estimated_minutes)
+
+    def time_rate(self, elapsed_estimated_minutes: float, total_minutes: float) -> int:
+        return self.percent(elapsed_estimated_minutes, total_minutes)
+
+
+class DefaultScoringPolicy(ScoringPolicy):
+    """Current Flow State behaviour (identical to v1)."""
+    name = "default"
+
+
+class FullSessionsOnlyPolicy(ScoringPolicy):
+    """Example alternative: only a finished session (>= 100%) earns a tomato."""
+    name = "full_sessions_only"
+
+    def reward_for(self, fraction: float) -> float:
+        return 1.0 if fraction >= 1.0 else 0.0
+
+
+POLICIES = {p.name: p for p in (DefaultScoringPolicy, FullSessionsOnlyPolicy)}
+
+
+def get_policy(name: str = "default") -> ScoringPolicy:
+    return POLICIES.get(name, DefaultScoringPolicy)()
+
+===== FILE: ./src/flow_state/core/timer.py =====
+from PySide6.QtCore import QObject, QTimer, Signal
+
+from flow_state.core.scoring import ScoringPolicy, get_policy
+
+
+class PomodoroTimer(QObject):
+    tick = Signal(str, int)
+    mode_changed = Signal(str, int)
+    finished = Signal(str)
+    skipped = Signal(str)
+    running_changed = Signal(bool)
+    period_ended = Signal(str, float)
+
+    VALID_MODES = {"work", "short_break", "long_break"}
+
+    def __init__(self, settings: dict, policy: ScoringPolicy = None):
+        super().__init__()
+        self.policy = policy or get_policy()
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._on_tick)
+        self.settings = {}
+        self.mode = "work"
+        self.remaining_seconds = 0
+        self.completed_work_sessions = 0
+        self.update_settings(settings)
+        self.remaining_seconds = self.duration_for_mode(self.mode)
+
+    def update_settings(self, settings: dict):
+        def positive_int(key, default):
+            try:
+                return max(1, int(settings.get(key, default)))
+            except (TypeError, ValueError):
+                return default
+        self.settings = {
+            "work_duration": positive_int("work_duration", 25),
+            "short_break": positive_int("short_break", 5),
+            "long_break": positive_int("long_break", 15),
+            "sessions_before_long_break": positive_int("sessions_before_long_break", 4),
+        }
+
+    def duration_for_mode(self, mode):
+        if mode == "work":
+            return self.settings["work_duration"] * 60
+        if mode == "short_break":
+            return self.settings["short_break"] * 60
+        if mode == "long_break":
+            return self.settings["long_break"] * 60
+        raise ValueError(f"Unknown timer mode: {mode}")
+
+    def start(self):
+        if self.remaining_seconds <= 0:
+            self.remaining_seconds = self.duration_for_mode(self.mode)
+            self.emit_state()
+        if not self.timer.isActive():
+            self.timer.start()
+            self.running_changed.emit(True)
+
+    def pause(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.running_changed.emit(False)
+
+    def is_running(self):
+        return self.timer.isActive()
+
+    def reset(self, reset_sessions=False):
+        self.pause()
+        self.mode = "work"
+        if reset_sessions:
+            self.completed_work_sessions = 0
+        self.remaining_seconds = self.duration_for_mode(self.mode)
+        self.mode_changed.emit(self.mode, self.completed_work_sessions)
+        self.emit_state()
+
+    def reset_current_period(self):
+        self.pause()
+        self.remaining_seconds = self.duration_for_mode(self.mode)
+        self.mode_changed.emit(self.mode, self.completed_work_sessions)
+        self.emit_state()
+
+    def set_mode(self, mode):
+        if mode not in self.VALID_MODES:
+            raise ValueError(f"Unknown timer mode: {mode}")
+        self.pause()
+        self.mode = mode
+        self.remaining_seconds = self.duration_for_mode(mode)
+        self.mode_changed.emit(self.mode, self.completed_work_sessions)
+        self.emit_state()
+
+    def skip(self):
+        was_running = self.timer.isActive()
+        self.skipped.emit(self.mode)
+        self._move_to_next_period(completed=False)
+        if was_running:
+            self.timer.start()
+
+    def finish_early(self):
+        old_mode = self.mode
+        full = self.duration_for_mode(old_mode)
+        elapsed = max(0, full - self.remaining_seconds)
+        fraction = self.policy.session_fraction(elapsed, full) if old_mode == "work" else 0.0
+        self.pause()
+        self.period_ended.emit(old_mode, fraction)
+        self._move_to_next_period(completed=False)
+
+    def _on_tick(self):
+        if self.remaining_seconds <= 0:
+            return
+        self.remaining_seconds -= 1
+        if self.remaining_seconds == 0:
+            old_mode = self.mode
+            self.period_ended.emit(old_mode, 1.0 if old_mode == "work" else 0.0)
+            self.finished.emit(old_mode)
+            self._move_to_next_period(completed=True)
+        else:
+            self.emit_state()
+
+    def _move_to_next_period(self, completed):
+        if self.mode == "work":
+            if completed:
+                self.completed_work_sessions += 1
+            if completed and self.completed_work_sessions % self.settings["sessions_before_long_break"] == 0:
+                self.mode = "long_break"
+            else:
+                self.mode = "short_break"
+        else:
+            self.mode = "work"
+        self.remaining_seconds = self.duration_for_mode(self.mode)
+        self.mode_changed.emit(self.mode, self.completed_work_sessions)
+        self.emit_state()
+
+    def formatted_time(self):
+        minutes, seconds = divmod(max(0, self.remaining_seconds), 60)
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def emit_state(self):
+        self.tick.emit(self.formatted_time(), self.remaining_seconds)
+
+===== FILE: ./src/flow_state/data/__init__.py =====
+
+===== FILE: ./src/flow_state/data/database.py =====
+"""SQLite data-access layer. Only SQL lives here; no business rules, no UI."""
+import shutil
+import sqlite3
+from pathlib import Path
+
+from flow_state.data.migrations import migrate
+from flow_state.paths import APP_DIR, DB_PATH, LEGACY_APP_DIR
+
+DEFAULT_SETTINGS = {
+    "work_duration": "25",
+    "short_break": "5",
+    "long_break": "15",
+    "sessions_before_long_break": "4",
+    "theme_mode": "system",
+    "language": "ar",
+    "scoring_policy": "default",
+}
+
+
+def _migrate_legacy_data():
+    """One-time, non-destructive copy of the old ~/.focus-todo database."""
+    if DB_PATH.exists():
+        return
+    legacy_db = LEGACY_APP_DIR / "data.db"
+    if not legacy_db.exists():
+        return
+    try:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_db, LEGACY_APP_DIR / "data.db.pre-migration-backup")
+        shutil.copy2(legacy_db, DB_PATH)
+    except OSError:
+        pass
+
+
+class Database:
+    def __init__(self, db_path=DB_PATH):
+        if str(db_path) != ":memory:":
+            db_path = Path(db_path)
+            if db_path == DB_PATH:
+                _migrate_legacy_data()
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.schema_version = migrate(self.conn)
+        self.insert_default_settings()
+        self.ensure_default_folder()
+
+    # ------------------------------------------------------------ settings
+    def insert_default_settings(self):
+        with self.conn:
+            for key, value in DEFAULT_SETTINGS.items():
+                self.conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    def get_settings(self):
+        return {r["key"]: r["value"] for r in self.conn.execute("SELECT key, value FROM settings")}
+
+    def update_setting(self, key, value):
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+
+    def update_settings(self, settings: dict):
+        with self.conn:
+            for key, value in settings.items():
+                self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+
+    # ------------------------------------------------------------- folders
+    def ensure_default_folder(self):
+        if self.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0] == 0:
+            self.add_folder("Inbox")
+
+    def get_folders(self):
+        return self.conn.execute("SELECT id, name FROM folders ORDER BY name COLLATE NOCASE").fetchall()
+
+    def add_folder(self, name):
+        name = name.strip()
+        if not name:
+            return None
+        with self.conn:
+            return self.conn.execute("INSERT INTO folders (name) VALUES (?)", (name,)).lastrowid
+
+    def get_folder_name(self, folder_id):
+        row = self.conn.execute("SELECT name FROM folders WHERE id = ?", (folder_id,)).fetchone()
+        return row["name"] if row else None
+
+    def delete_folder(self, folder_id):
+        with self.conn:
+            self.conn.execute("DELETE FROM focus_sessions WHERE task_id IN "
+                              "(SELECT id FROM tasks WHERE folder_id = ?)", (folder_id,))
+            self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+
+    # --------------------------------------------------------------- tasks
+    def add_task(self, folder_id, title, priority=0, notes="", start_at=None, end_at=None,
+                 estimated_sessions=None, parent_id=None):
+        title = title.strip()
+        if not title:
+            return None
+        with self.conn:
+            cur = self.conn.execute("""
+                INSERT INTO tasks (folder_id, title, priority, notes, due_at, start_at, end_at,
+                                   estimated_sessions, parent_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (folder_id, title, priority, notes, end_at, start_at, end_at, estimated_sessions, parent_id))
+        return cur.lastrowid
+
+    def update_task(self, task_id, title, priority, notes="", start_at=None, end_at=None, estimated_sessions=None):
+        with self.conn:
+            self.conn.execute("""
+                UPDATE tasks SET title = ?, priority = ?, notes = ?, due_at = ?, start_at = ?, end_at = ?,
+                                 estimated_sessions = ?
+                WHERE id = ?""",
+                (title.strip(), priority, notes, end_at, start_at, end_at, estimated_sessions, task_id))
+
+    def delete_task(self, task_id):
+        with self.conn:
+            # history of the task and all its subtasks
+            self.conn.execute("""
+                WITH RECURSIVE tree(id) AS (
+                    SELECT ? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id = tree.id)
+                DELETE FROM focus_sessions WHERE task_id IN (SELECT id FROM tree)""", (task_id,))
+            self.conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            self.conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM task_tags)")
+
+    def set_completed(self, task_id, completed):
+        flag = 1 if completed else 0
+        with self.conn:
+            self.conn.execute("""
+                UPDATE tasks
+                SET completed = ?,
+                    completed_at = CASE WHEN ? THEN datetime('now', 'localtime') ELSE NULL END,
+                    is_current = CASE WHEN ? THEN 0 ELSE is_current END
+                WHERE id = ?""", (flag, flag, flag, task_id))
+
+    def set_current_task(self, task_id):
+        with self.conn:
+            self.conn.execute("UPDATE tasks SET is_current = 0")
+            self.conn.execute("UPDATE tasks SET is_current = 1 WHERE id = ?", (task_id,))
+
+    def clear_current_task(self):
+        with self.conn:
+            self.conn.execute("UPDATE tasks SET is_current = 0")
+
+    def get_current_task(self):
+        return self.conn.execute("SELECT * FROM tasks WHERE is_current = 1 LIMIT 1").fetchone()
+
+    def get_task(self, task_id):
+        return self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+
+    def get_subtasks(self, parent_id):
+        return self.conn.execute("SELECT * FROM tasks WHERE parent_id = ? ORDER BY position, id",
+                                 (parent_id,)).fetchall()
+
+    def get_tasks(self, folder_id=None, priority_filter=None, date_filter=None,
+                  selected_date=None, completed_filter=None, top_level_only=True):
+        query = "SELECT tasks.* FROM tasks WHERE 1 = 1"
+        params = []
+        if top_level_only:
+            query += " AND tasks.parent_id IS NULL"
+        if folder_id is not None:
+            query += " AND tasks.folder_id = ?"
+            params.append(folder_id)
+        if priority_filter is not None:
+            query += " AND tasks.priority = ?"
+            params.append(priority_filter)
+        today = "date('now', 'localtime')"
+        if selected_date:
+            if completed_filter is True:
+                query += " AND date(tasks.completed_at) = date(?)"
+                params.append(selected_date)
+            else:
+                query += (" AND date(COALESCE(tasks.start_at, tasks.due_at)) <= date(?)"
+                          " AND date(COALESCE(tasks.end_at, tasks.due_at)) >= date(?)")
+                params.extend([selected_date, selected_date])
+        elif date_filter == "today":
+            query += f" AND date(tasks.due_at) = {today}"
+        elif date_filter == "upcoming":
+            query += f" AND date(tasks.due_at) > {today}"
+        elif date_filter == "overdue":
+            query += " AND datetime(tasks.due_at) < datetime('now', 'localtime')"
+        elif date_filter == "completed":
+            completed_filter = True
+        if completed_filter is not None:
+            query += " AND tasks.completed = ?"
+            params.append(1 if completed_filter else 0)
+        query += " ORDER BY completed ASC, due_at IS NULL ASC, due_at ASC, priority DESC, id DESC"
+        return self.conn.execute(query, params).fetchall()
+
+    # -------------------------------------------------------- focus history
+    def add_focus_session(self, task_id, fraction, focus_seconds, reward):
+        with self.conn:
+            self.conn.execute("UPDATE tasks SET completed_sessions = "
+                              "ROUND(COALESCE(completed_sessions, 0) + ?, 2) WHERE id = ?", (reward, task_id))
+            self.conn.execute("INSERT INTO focus_sessions(task_id, fraction, focus_seconds) VALUES (?, ?, ?)",
+                              (task_id, fraction, max(0, int(focus_seconds))))
+
+    def get_task_focus_seconds(self, task_id):
+        row = self.conn.execute("SELECT COALESCE(SUM(focus_seconds), 0) FROM focus_sessions WHERE task_id = ?",
+                                (task_id,)).fetchone()
+        return int(row[0])
+
+    # ------------------------------------------------------- raw analytics
+    def analytics_raw(self):
+        """Raw totals only. Calculations are done by the scoring policy."""
+        c = self.conn
+        tasks = c.execute("SELECT COUNT(*) total, COALESCE(SUM(completed),0) done FROM tasks "
+                          "WHERE parent_id IS NULL").fetchone()
+        estimated = c.execute("SELECT COALESCE(SUM(estimated_sessions),0) FROM tasks "
+                              "WHERE estimated_sessions IS NOT NULL").fetchone()[0]
+        focus_all = c.execute("SELECT COALESCE(SUM(focus_seconds),0) FROM focus_sessions").fetchone()[0]
+        focus_estimated = c.execute("""
+            SELECT COALESCE(SUM(fs.focus_seconds),0) FROM focus_sessions fs
+            JOIN tasks t ON t.id = fs.task_id WHERE t.estimated_sessions IS NOT NULL""").fetchone()[0]
+        return {"total_tasks": int(tasks["total"]), "done_tasks": int(tasks["done"]),
+                "estimated_sessions": float(estimated or 0), "focus_seconds": int(focus_all or 0),
+                "estimated_focus_seconds": int(focus_estimated or 0)}
+
+    def weekly_analytics(self):
+        return self.conn.execute("""
+            WITH RECURSIVE days(d) AS (
+                SELECT date('now','localtime','-6 days')
+                UNION ALL SELECT date(d,'+1 day') FROM days WHERE d < date('now','localtime'))
+            SELECT d,
+              (SELECT COUNT(*) FROM tasks WHERE completed=1 AND parent_id IS NULL
+                                           AND date(completed_at)=d) completed_tasks,
+              (SELECT COALESCE(SUM(focus_seconds),0) FROM focus_sessions WHERE date(created_at)=d) focus_seconds
+            FROM days ORDER BY d""").fetchall()
+
+    def task_counts(self):
+        row = self.conn.execute("""
+            SELECT
+              SUM(CASE WHEN date(due_at) = date('now','localtime') AND completed=0 THEN 1 ELSE 0 END) today,
+              SUM(CASE WHEN date(due_at) > date('now','localtime') AND completed=0 THEN 1 ELSE 0 END) upcoming,
+              SUM(CASE WHEN datetime(due_at) < datetime('now','localtime') AND completed=0 THEN 1 ELSE 0 END) overdue,
+              SUM(CASE WHEN completed=1 THEN 1 ELSE 0 END) completed
+            FROM tasks WHERE parent_id IS NULL""").fetchone()
+        return {k: int(row[k] or 0) for k in ("today", "upcoming", "overdue", "completed")}
+
+    def close(self):
+        self.conn.close()
+
+===== FILE: ./src/flow_state/data/migrations/001_initial.py =====
+"""Base schema. Idempotent so databases created by Flow State v1
+(which have no user_version) upgrade safely without data loss."""
+VERSION = 1
+
+
+def upgrade(conn):
+    from flow_state.data.migrations import column_names
+    conn.execute("""CREATE TABLE IF NOT EXISTS folders (
+        id INTEGER PRIMARY KEY, name TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY,
+        folder_id INTEGER,
+        title TEXT NOT NULL,
+        priority INTEGER DEFAULT 0,
+        completed INTEGER DEFAULT 0,
+        is_current INTEGER DEFAULT 0,
+        notes TEXT DEFAULT '',
+        due_at TEXT DEFAULT NULL,
+        start_at TEXT DEFAULT NULL,
+        end_at TEXT DEFAULT NULL,
+        estimated_sessions INTEGER DEFAULT NULL,
+        completed_sessions REAL DEFAULT 0,
+        completed_at TEXT DEFAULT NULL,
+        FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE CASCADE)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tags (
+        id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS task_tags (
+        task_id INTEGER, tag_id INTEGER,
+        PRIMARY KEY(task_id, tag_id),
+        FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+        FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS focus_sessions (
+        id INTEGER PRIMARY KEY,
+        task_id INTEGER,
+        fraction REAL NOT NULL,
+        focus_seconds INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE SET NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY, value TEXT)""")
+    # Columns added during v1 development (old databases may miss them).
+    existing = column_names(conn, "tasks")
+    for name, definition in (("due_at", "TEXT DEFAULT NULL"), ("start_at", "TEXT DEFAULT NULL"),
+                             ("end_at", "TEXT DEFAULT NULL"), ("estimated_sessions", "INTEGER DEFAULT NULL"),
+                             ("completed_sessions", "REAL DEFAULT 0"), ("completed_at", "TEXT DEFAULT NULL")):
+        if name not in existing:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+    conn.execute("UPDATE tasks SET start_at = COALESCE(start_at, due_at), "
+                 "end_at = COALESCE(end_at, due_at) WHERE due_at IS NOT NULL")
+
+===== FILE: ./src/flow_state/data/migrations/002_subtasks.py =====
+"""Prepare subtasks: a task may have a parent task.
+Top-level tasks have parent_id = NULL. Deleting a parent deletes its subtasks."""
+VERSION = 2
+
+
+def upgrade(conn):
+    from flow_state.data.migrations import column_names
+    if "parent_id" not in column_names(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER DEFAULT NULL "
+                     "REFERENCES tasks(id) ON DELETE CASCADE")
+    if "position" not in column_names(conn, "tasks"):
+        conn.execute("ALTER TABLE tasks ADD COLUMN position INTEGER DEFAULT 0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)")
+
+===== FILE: ./src/flow_state/data/migrations/__init__.py =====
+"""Versioned schema migrations.
+
+Each migration is a module named NNN_description.py exposing
+    VERSION: int
+    def upgrade(conn): ...
+The current version is stored in `PRAGMA user_version`.
+To add a migration: create the next numbered file and append it to MIGRATIONS.
+Never edit a migration that has already been released.
+"""
+import importlib
+
+_MODULES = [
+    "001_initial",
+    "002_subtasks",
+]
+
+MIGRATIONS = [importlib.import_module(f"{__name__}.{m}") for m in _MODULES]
+
+
+def current_version(conn) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def migrate(conn) -> int:
+    version = current_version(conn)
+    for module in sorted(MIGRATIONS, key=lambda m: m.VERSION):
+        if module.VERSION > version:
+            with conn:
+                module.upgrade(conn)
+                conn.execute(f"PRAGMA user_version = {int(module.VERSION)}")
+            version = module.VERSION
+    return version
+
+
+def column_names(conn, table):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+===== FILE: ./src/flow_state/i18n/__init__.py =====
+"""Runtime UI localization.
+
+Source strings in the code are Arabic. `en` maps Arabic -> English, and every
+other language maps English -> target. Missing translations fall back to
+English (never to Arabic). Qt is imported lazily so this module is testable
+without a display.
+"""
+from functools import lru_cache
+
+from flow_state.i18n.locales import load_packs
+
+PACKS = load_packs()
+SOURCE = "ar"
+PIVOT = "en"
+LANGUAGES = {code: pack.NAME for code, pack in PACKS.items()}
+RTL = {code for code, pack in PACKS.items() if pack.RTL}
+_current = SOURCE
+
+
+def _pivot():
+    return PACKS[PIVOT].MESSAGES
+
+
+def set_language(code):
+    global _current
+    _current = code if code in PACKS else SOURCE
+
+
+def language():
+    return _current
+
+
+def is_rtl(code=None):
+    return (code or _current) in RTL
+
+
+def qt_locale_name(code=None):
+    return getattr(PACKS.get(code or _current), "QT_LOCALE", "en_US")
+
+
+def tr(text):
+    """Translate one Arabic source string to the current language."""
+    if _current == SOURCE:
+        return text
+    english = _pivot().get(text, text)
+    if _current == PIVOT:
+        return english
+    return PACKS[_current].MESSAGES.get(english, english)
+
+
+@lru_cache(maxsize=1)
+def _reverse_index():
+    """visible text in ANY language -> Arabic source (prevents translating
+    over already-translated text when switching languages repeatedly)."""
+    reverse = {}
+    for source, english in _pivot().items():
+        reverse[source] = source
+        reverse[english] = source
+        for code, pack in PACKS.items():
+            if code in (SOURCE, PIVOT):
+                continue
+            value = pack.MESSAGES.get(english)
+            if value:
+                reverse[value] = source
+    return sorted(reverse.items(), key=lambda kv: len(kv[0]), reverse=True)
+
+
+@lru_cache(maxsize=1)
+def _sources_by_length():
+    return sorted(_pivot(), key=len, reverse=True)
+
+
+def translate_text(text):
+    """Translate a full visible string (may contain several source phrases)."""
+    if not text:
+        return text
+    result = text
+    for visible, source in _reverse_index():
+        if visible and visible in result:
+            result = result.replace(visible, source)
+    if _current == SOURCE:
+        return result
+    for source in _sources_by_length():
+        if source in result:
+            result = result.replace(source, tr(source))
+    return result
+
+
+def translate_tree(root):
+    """Retranslate every label/button/combo/placeholder/header under root."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QAbstractButton, QComboBox, QGroupBox, QLabel, QLineEdit, QTableWidget
+
+    root.setLayoutDirection(Qt.RightToLeft if is_rtl() else Qt.LeftToRight)
+    if hasattr(root, "windowTitle") and root.windowTitle():
+        root.setWindowTitle(translate_text(root.windowTitle()))
+    widgets = set()
+    for cls in (QLabel, QAbstractButton, QGroupBox):
+        widgets.update(root.findChildren(cls))
+    for widget in widgets:
+        if isinstance(widget, QGroupBox):
+            widget.setTitle(translate_text(widget.title()))
+        else:
+            widget.setText(translate_text(widget.text()))
+    for combo in root.findChildren(QComboBox):
+        for i in range(combo.count()):
+            combo.setItemText(i, translate_text(combo.itemText(i)))
+    for line in root.findChildren(QLineEdit):
+        line.setPlaceholderText(translate_text(line.placeholderText()))
+    for table in root.findChildren(QTableWidget):
+        for col in range(table.columnCount()):
+            item = table.horizontalHeaderItem(col)
+            if item:
+                item.setText(translate_text(item.text()))
+
+===== FILE: ./src/flow_state/i18n/locales/__init__.py =====
+"""Language packs. One file per language.
+
+To add a language, copy `fr.py` to `<code>.py`, change CODE / NAME / RTL /
+QT_LOCALE / ORDER and translate the values. It is discovered automatically.
+Run `pytest tests/test_i18n.py` to list any missing keys.
+"""
+import importlib
+import pkgutil
+
+
+def load_packs():
+    packs = {}
+    for info in pkgutil.iter_modules(__path__):
+        if info.name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{__name__}.{info.name}")
+        packs[module.CODE] = module
+    return dict(sorted(packs.items(), key=lambda kv: getattr(kv[1], "ORDER", 999)))
+
+===== FILE: ./src/flow_state/i18n/locales/ar.py =====
+"""Arabic is the SOURCE language: UI strings are written in Arabic in the code."""
+CODE = 'ar'
+NAME = 'العربية'
+RTL = True
+QT_LOCALE = 'ar_EG'
+ORDER = 0
+
+MESSAGES = {}
+
+===== FILE: ./src/flow_state/i18n/locales/de.py =====
+"""Deutsch. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'de'
+NAME = 'Deutsch'
+RTL = False
+QT_LOCALE = 'de_DE'
+ORDER = 3
+
+MESSAGES = {'Home': 'Startseite',
+ 'Statistics': 'Statistiken',
+ 'Calendar': 'Kalender',
+ 'Folders': 'Ordner',
+ 'Settings': 'Einstellungen',
+ 'Add Task': 'Aufgabe hinzufügen',
+ 'New task': 'Neue Aufgabe',
+ 'Current task': 'Aktuelle Aufgabe',
+ 'Change': 'Ändern',
+ 'Focus': 'Fokus',
+ 'Short break': 'Kurze Pause',
+ 'Long break': 'Lange Pause',
+ 'Start': 'Starten',
+ 'Pause': 'Pause',
+ 'Skip': 'Überspringen',
+ 'Finish': 'Beenden',
+ 'All tasks': 'Alle Aufgaben',
+ 'Today tasks': 'Heutige Aufgaben',
+ 'All priorities': 'Alle Prioritäten',
+ 'Unspecified': 'Nicht angegeben',
+ 'Low': 'Niedrig',
+ 'Medium': 'Mittel',
+ 'High': 'Hoch',
+ 'Done': 'Erledigt',
+ 'Task': 'Aufgabe',
+ 'Schedule': 'Zeitraum',
+ 'Priority': 'Priorität',
+ 'Sessions': 'Sitzungen',
+ 'Select': 'Auswählen',
+ 'Edit': 'Bearbeiten',
+ 'Delete': 'Löschen',
+ 'Save': 'Speichern',
+ 'Cancel': 'Abbrechen',
+ 'Title:': 'Titel:',
+ 'Estimated sessions:': 'Geschätzte Sitzungen:',
+ 'Set estimated sessions': 'Geschätzte Sitzungen festlegen',
+ 'Set task duration': 'Aufgabendauer festlegen',
+ 'From:': 'Von:',
+ 'To:': 'Bis:',
+ 'Time:': 'Zeit:',
+ 'Notes:': 'Notizen:',
+ 'Statistics & Analytics': 'Statistiken und Analysen',
+ 'Total tasks': 'Aufgaben gesamt',
+ 'Completed tasks': 'Erledigte Aufgaben',
+ 'Overdue tasks': 'Überfällige Aufgaben',
+ 'Completion rate': 'Abschlussrate',
+ 'Total time': 'Gesamtzeit',
+ 'Elapsed time': 'Vergangene Zeit',
+ 'Remaining time': 'Verbleibende Zeit',
+ 'Time rate': 'Zeitfortschritt',
+ 'Task completion': 'Aufgabenfortschritt',
+ 'Focus time': 'Fokuszeit',
+ 'Calendar & daily tasks': 'Kalender und tägliche Aufgaben',
+ 'Automatic column sizing': 'Automatische Spaltenbreite',
+ 'Edit panels after saving settings': 'Bereiche nach dem Speichern bearbeiten',
+ 'Focus duration (minutes):': 'Fokusdauer (Minuten):',
+ 'Short break:': 'Kurze Pause:',
+ 'Long break:': 'Lange Pause:',
+ 'Sessions before long break:': 'Sitzungen vor langer Pause:',
+ 'Appearance:': 'Darstellung:',
+ 'Language:': 'Sprache:',
+ 'Light': 'Hell',
+ 'Dark': 'Dunkel',
+ 'System': 'System',
+ 'Show': 'Anzeigen',
+ 'Hide': 'Ausblenden',
+ 'completed tasks': 'erledigte Aufgaben',
+ 'Running': 'Läuft',
+ 'No tasks': 'Keine Aufgaben',
+ 'No duration': 'Keine Dauer',
+ 'No schedule': 'Kein Termin'}
+
+===== FILE: ./src/flow_state/i18n/locales/en.py =====
+"""English. Keys are the Arabic source strings; values are English.
+Every other language translates FROM these English values."""
+CODE = 'en'
+NAME = 'English'
+RTL = False
+QT_LOCALE = 'en_US'
+ORDER = 1
+
+MESSAGES = {'الصفحة الرئيسية': 'Home',
+ 'الإحصائيات': 'Statistics',
+ 'التقويم': 'Calendar',
+ 'المجلدات': 'Folders',
+ 'الإعدادات': 'Settings',
+ 'مهمة جديدة': 'New task',
+ 'المهمة الحالية': 'Current task',
+ 'تغيير': 'Change',
+ 'تركيز': 'Focus',
+ 'استراحة قصيرة': 'Short break',
+ 'استراحة طويلة': 'Long break',
+ 'ابدأ': 'Start',
+ 'إيقاف': 'Pause',
+ 'تخطي': 'Skip',
+ 'إنهاء': 'Finish',
+ 'كل المهام': 'All tasks',
+ 'مهام اليوم': 'Today tasks',
+ 'كل الأولويات': 'All priorities',
+ 'غير محددة': 'Unspecified',
+ 'منخفضة': 'Low',
+ 'متوسطة': 'Medium',
+ 'عالية': 'High',
+ 'تم': 'Done',
+ 'المهمة': 'Task',
+ 'الموعد': 'Schedule',
+ 'الأولوية': 'Priority',
+ 'الدورات': 'Sessions',
+ 'اختيار': 'Select',
+ 'تعديل': 'Edit',
+ 'حذف': 'Delete',
+ 'إضافة مهمة': 'Add Task',
+ 'تعديل المهمة': 'Edit Task',
+ 'العنوان:': 'Title:',
+ 'الأولوية:': 'Priority:',
+ 'الدورات المقدرة:': 'Estimated sessions:',
+ 'تحديد عدد دورات مقدر': 'Set estimated sessions',
+ 'تحديد مدة للمهمة': 'Set task duration',
+ 'من يوم:': 'From:',
+ 'إلى يوم:': 'To:',
+ 'الوقت:': 'Time:',
+ 'ملاحظات:': 'Notes:',
+ 'حفظ': 'Save',
+ 'إلغاء': 'Cancel',
+ 'الإحصائيات والتحليلات': 'Statistics & Analytics',
+ 'إجمالي المهام': 'Total tasks',
+ 'المهام المنجزة': 'Completed tasks',
+ 'المهام المتأخرة': 'Overdue tasks',
+ 'معدل الإنجاز': 'Completion rate',
+ 'إجمالي الوقت': 'Total time',
+ 'الوقت المنقضي': 'Elapsed time',
+ 'الوقت المتبقي': 'Remaining time',
+ 'معدل الوقت': 'Time rate',
+ 'إنجاز المهام': 'Task completion',
+ 'وقت التركيز': 'Focus time',
+ 'التقويم والمهام اليومية': 'Calendar & daily tasks',
+ 'إضافة من قائمة المهام': 'Add from task list',
+ 'الوضع التلقائي للأعمدة': 'Automatic column sizing',
+ 'تعديل النوافذ الداخلية بعد حفظ الإعدادات': 'Edit panels after saving settings',
+ 'مدة التركيز بالدقائق:': 'Focus duration (minutes):',
+ 'الاستراحة القصيرة:': 'Short break:',
+ 'الاستراحة الطويلة:': 'Long break:',
+ 'الجلسات قبل الاستراحة الطويلة:': 'Sessions before long break:',
+ 'مظهر التطبيق:': 'Appearance:',
+ 'فاتح': 'Light',
+ 'داكن': 'Dark',
+ 'حسب النظام': 'System',
+ 'لغة التطبيق:': 'Language:',
+ 'خطط بوضوح، ركّز بعمق': 'Plan clearly, focus deeply',
+ 'اختر مهمة وابدأ التركيز': 'Choose a task and start focusing',
+ 'بدون موعد': 'No schedule',
+ 'بدون مدة': 'No duration',
+ 'الوقت المقدر: غير محدد': 'Estimated time: unspecified',
+ 'الوقت المتبقي: غير محدد': 'Remaining time: unspecified',
+ 'عرض المهام المكتملة': 'Show completed tasks',
+ 'إخفاء المهام المكتملة': 'Hide completed tasks',
+ 'لا توجد مهام في هذا العرض.': 'No tasks in this view.',
+ 'أضف مهمة غير مكتملة أولًا.': 'Add an incomplete task first.',
+ 'إنجاز': 'Completion',
+ 'اكتب اسم المهمة ثم اضغط إضافة...': 'Enter a task name, then select Add.',
+ 'الحالية': 'Current',
+ 'المهام القادمة': 'Upcoming tasks',
+ 'إخفاء': 'Hide',
+ 'عرض': 'Show',
+ 'خروج': 'Quit',
+ 'المهام المكتملة': 'completed tasks',
+ 'مهام يوم ': 'Tasks for ',
+ 'الوقت المقدر: ': 'Estimated time: ',
+ 'الوقت المتبقي: ': 'Remaining time: ',
+ 'المدة: ': 'Duration: ',
+ 'الأولوية: ': 'Priority: ',
+ 'الوقت المقدر': 'Estimated time',
+ 'يعمل الآن': 'Running',
+ 'ساعة': 'hour',
+ 'ساعة و': 'hour and ',
+ 'دقيقة': 'minute',
+ ' س ': ' h ',
+ ' د': ' m',
+ 'د': 'm',
+ 'أحد': 'Sun',
+ 'اثنين': 'Mon',
+ 'ثلاثاء': 'Tue',
+ 'أربعاء': 'Wed',
+ 'خميس': 'Thu',
+ 'جمعة': 'Fri',
+ 'سبت': 'Sat',
+ 'انتهت جلسة التركيز، حان وقت الراحة.': 'Focus session finished. Time for a break.',
+ 'انتهت الراحة، لنعد إلى التركيز.': 'Break finished. Back to focus.',
+ 'لا توجد مهام': 'No tasks',
+ 'لا توجد مهام غير مكتملة في قائمة المهام.': 'There are no incomplete tasks in the task list.',
+ 'لا يوجد مشروع': 'No folder',
+ 'أنشئ مشروعًا أولًا.': 'Create a folder first.',
+ 'بيانات ناقصة': 'Missing information',
+ 'اكتب عنوان المهمة.': 'Enter a task title.',
+ 'مدة غير صحيحة': 'Invalid duration',
+ 'تاريخ البداية يجب أن يسبق تاريخ النهاية.': 'The start date must be before the end date.',
+ 'هل تريد حذف هذه المهمة؟': 'Delete this task?',
+ 'اختر المهمة التي تريد التركيز عليها:': 'Choose a task to focus on:',
+ 'اختر مهمة لإضافتها إلى اليوم المحدد:': 'Choose a task to add to the selected day:',
+ 'تغيير المهمة الحالية': 'Change current task',
+ 'إضافة مجلد': 'Add folder',
+ 'اسم المجلد:': 'Folder name:',
+ 'حذف المجلد': 'Delete folder',
+ 'هل تريد حذف هذا المجلد وكل مهامه؟': 'Delete this folder and all its tasks?',
+ 'تم حفظ التخطيط.': 'Layout saved.',
+ 'وضع تعديل التخطيط: اسحب الفواصل داخل كل صفحة ثم اضغط حفظ التخطيط.': 'Layout edit mode: drag page dividers, '
+                                                                      'then select Save layout.',
+ 'يمكنك شد الفواصل بين البطاقات في كل صفحة، ثم الضغط على «حفظ التخطيط».': 'Resize page panels by dragging '
+                                                                          'their dividers, then select Save '
+                                                                          'layout.',
+ 'حفظ التخطيط': 'Save layout',
+ 'جديد': 'New',
+ 'نظام الحساب:': 'Scoring system:',
+ 'افتراضي (تقدم جزئي)': 'Default (partial progress)',
+ 'الجلسات الكاملة فقط': 'Full sessions only'}
+
+===== FILE: ./src/flow_state/i18n/locales/es.py =====
+"""Español. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'es'
+NAME = 'Español'
+RTL = False
+QT_LOCALE = 'es_ES'
+ORDER = 4
+
+MESSAGES = {'Home': 'Inicio',
+ 'Statistics': 'Estadísticas',
+ 'Calendar': 'Calendario',
+ 'Folders': 'Carpetas',
+ 'Settings': 'Configuración',
+ 'Add Task': 'Añadir tarea',
+ 'New task': 'Nueva tarea',
+ 'Current task': 'Tarea actual',
+ 'Change': 'Cambiar',
+ 'Focus': 'Enfoque',
+ 'Short break': 'Descanso corto',
+ 'Long break': 'Descanso largo',
+ 'Start': 'Iniciar',
+ 'Pause': 'Pausar',
+ 'Skip': 'Omitir',
+ 'Finish': 'Finalizar',
+ 'All tasks': 'Todas las tareas',
+ 'Today tasks': 'Tareas de hoy',
+ 'All priorities': 'Todas las prioridades',
+ 'Unspecified': 'Sin especificar',
+ 'Low': 'Baja',
+ 'Medium': 'Media',
+ 'High': 'Alta',
+ 'Done': 'Hecha',
+ 'Task': 'Tarea',
+ 'Schedule': 'Periodo',
+ 'Priority': 'Prioridad',
+ 'Sessions': 'Sesiones',
+ 'Select': 'Elegir',
+ 'Edit': 'Editar',
+ 'Delete': 'Eliminar',
+ 'Save': 'Guardar',
+ 'Cancel': 'Cancelar',
+ 'Title:': 'Título:',
+ 'Estimated sessions:': 'Sesiones estimadas:',
+ 'Set estimated sessions': 'Definir sesiones estimadas',
+ 'Set task duration': 'Definir duración',
+ 'From:': 'Desde:',
+ 'To:': 'Hasta:',
+ 'Time:': 'Hora:',
+ 'Notes:': 'Notas:',
+ 'Statistics & Analytics': 'Estadísticas y análisis',
+ 'Total tasks': 'Tareas totales',
+ 'Completed tasks': 'Tareas completadas',
+ 'Overdue tasks': 'Tareas atrasadas',
+ 'Completion rate': 'Tasa de finalización',
+ 'Total time': 'Tiempo total',
+ 'Elapsed time': 'Tiempo transcurrido',
+ 'Remaining time': 'Tiempo restante',
+ 'Time rate': 'Progreso de tiempo',
+ 'Task completion': 'Finalización de tareas',
+ 'Focus time': 'Tiempo de enfoque',
+ 'Calendar & daily tasks': 'Calendario y tareas diarias',
+ 'Automatic column sizing': 'Tamaño automático de columnas',
+ 'Edit panels after saving settings': 'Editar paneles después de guardar',
+ 'Focus duration (minutes):': 'Duración de enfoque (minutos):',
+ 'Short break:': 'Descanso corto:',
+ 'Long break:': 'Descanso largo:',
+ 'Sessions before long break:': 'Sesiones antes del descanso largo:',
+ 'Appearance:': 'Apariencia:',
+ 'Language:': 'Idioma:',
+ 'Light': 'Claro',
+ 'Dark': 'Oscuro',
+ 'System': 'Sistema',
+ 'Show': 'Mostrar',
+ 'Hide': 'Ocultar',
+ 'completed tasks': 'tareas completadas',
+ 'Running': 'En curso',
+ 'No tasks': 'Sin tareas',
+ 'No duration': 'Sin duración',
+ 'No schedule': 'Sin fecha'}
+
+===== FILE: ./src/flow_state/i18n/locales/fr.py =====
+"""Français. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'fr'
+NAME = 'Français'
+RTL = False
+QT_LOCALE = 'fr_FR'
+ORDER = 2
+
+MESSAGES = {'Home': 'Accueil',
+ 'Statistics': 'Statistiques',
+ 'Calendar': 'Calendrier',
+ 'Folders': 'Dossiers',
+ 'Settings': 'Paramètres',
+ 'Add Task': 'Ajouter une tâche',
+ 'New task': 'Nouvelle tâche',
+ 'Current task': 'Tâche actuelle',
+ 'Change': 'Changer',
+ 'Focus': 'Concentration',
+ 'Short break': 'Pause courte',
+ 'Long break': 'Pause longue',
+ 'Start': 'Démarrer',
+ 'Pause': 'Pause',
+ 'Skip': 'Passer',
+ 'Finish': 'Terminer',
+ 'All tasks': 'Toutes les tâches',
+ 'Today tasks': 'Tâches du jour',
+ 'All priorities': 'Toutes les priorités',
+ 'Unspecified': 'Non spécifiée',
+ 'Low': 'Faible',
+ 'Medium': 'Moyenne',
+ 'High': 'Élevée',
+ 'Done': 'Terminée',
+ 'Task': 'Tâche',
+ 'Schedule': 'Période',
+ 'Priority': 'Priorité',
+ 'Sessions': 'Sessions',
+ 'Select': 'Choisir',
+ 'Edit': 'Modifier',
+ 'Delete': 'Supprimer',
+ 'Save': 'Enregistrer',
+ 'Cancel': 'Annuler',
+ 'Title:': 'Titre :',
+ 'Estimated sessions:': 'Sessions estimées :',
+ 'Set estimated sessions': 'Définir les sessions estimées',
+ 'Set task duration': 'Définir la durée',
+ 'From:': 'Du :',
+ 'To:': 'Au :',
+ 'Time:': 'Heure :',
+ 'Notes:': 'Notes :',
+ 'Statistics & Analytics': 'Statistiques et analyses',
+ 'Total tasks': 'Total des tâches',
+ 'Completed tasks': 'Tâches terminées',
+ 'Overdue tasks': 'Tâches en retard',
+ 'Completion rate': 'Taux d’achèvement',
+ 'Total time': 'Temps total',
+ 'Elapsed time': 'Temps écoulé',
+ 'Remaining time': 'Temps restant',
+ 'Time rate': 'Taux de temps',
+ 'Task completion': 'Achèvement des tâches',
+ 'Focus time': 'Temps de concentration',
+ 'Calendar & daily tasks': 'Calendrier et tâches quotidiennes',
+ 'Automatic column sizing': 'Dimensionnement automatique des colonnes',
+ 'Edit panels after saving settings': 'Modifier les panneaux après enregistrement',
+ 'Focus duration (minutes):': 'Durée de concentration (minutes) :',
+ 'Short break:': 'Pause courte :',
+ 'Long break:': 'Pause longue :',
+ 'Sessions before long break:': 'Sessions avant la pause longue :',
+ 'Appearance:': 'Apparence :',
+ 'Language:': 'Langue :',
+ 'Light': 'Clair',
+ 'Dark': 'Sombre',
+ 'System': 'Système',
+ 'Show': 'Afficher',
+ 'Hide': 'Masquer',
+ 'completed tasks': 'tâches terminées',
+ 'Running': 'En cours',
+ 'No tasks': 'Aucune tâche',
+ 'No duration': 'Sans durée',
+ 'No schedule': 'Sans date'}
+
+===== FILE: ./src/flow_state/i18n/locales/it.py =====
+"""Italiano. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'it'
+NAME = 'Italiano'
+RTL = False
+QT_LOCALE = 'it_IT'
+ORDER = 5
+
+MESSAGES = {'Home': 'Home',
+ 'Statistics': 'Statistiche',
+ 'Calendar': 'Calendario',
+ 'Folders': 'Cartelle',
+ 'Settings': 'Impostazioni',
+ 'Add Task': 'Aggiungi attività',
+ 'New task': 'Nuova attività',
+ 'Current task': 'Attività corrente',
+ 'Change': 'Cambia',
+ 'Focus': 'Concentrazione',
+ 'Short break': 'Pausa breve',
+ 'Long break': 'Pausa lunga',
+ 'Start': 'Avvia',
+ 'Pause': 'Pausa',
+ 'Skip': 'Salta',
+ 'Finish': 'Termina',
+ 'All tasks': 'Tutte le attività',
+ 'Today tasks': 'Attività di oggi',
+ 'All priorities': 'Tutte le priorità',
+ 'Unspecified': 'Non specificata',
+ 'Low': 'Bassa',
+ 'Medium': 'Media',
+ 'High': 'Alta',
+ 'Done': 'Completata',
+ 'Task': 'Attività',
+ 'Schedule': 'Periodo',
+ 'Priority': 'Priorità',
+ 'Sessions': 'Sessioni',
+ 'Select': 'Seleziona',
+ 'Edit': 'Modifica',
+ 'Delete': 'Elimina',
+ 'Save': 'Salva',
+ 'Cancel': 'Annulla',
+ 'Title:': 'Titolo:',
+ 'Estimated sessions:': 'Sessioni stimate:',
+ 'Set estimated sessions': 'Imposta sessioni stimate',
+ 'Set task duration': 'Imposta durata',
+ 'From:': 'Da:',
+ 'To:': 'A:',
+ 'Time:': 'Ora:',
+ 'Notes:': 'Note:',
+ 'Statistics & Analytics': 'Statistiche e analisi',
+ 'Total tasks': 'Attività totali',
+ 'Completed tasks': 'Attività completate',
+ 'Overdue tasks': 'Attività scadute',
+ 'Completion rate': 'Tasso di completamento',
+ 'Total time': 'Tempo totale',
+ 'Elapsed time': 'Tempo trascorso',
+ 'Remaining time': 'Tempo rimanente',
+ 'Time rate': 'Avanzamento tempo',
+ 'Task completion': 'Completamento attività',
+ 'Focus time': 'Tempo di concentrazione',
+ 'Calendar & daily tasks': 'Calendario e attività giornaliere',
+ 'Automatic column sizing': 'Dimensionamento automatico colonne',
+ 'Appearance:': 'Aspetto:',
+ 'Language:': 'Lingua:',
+ 'Light': 'Chiaro',
+ 'Dark': 'Scuro',
+ 'System': 'Sistema',
+ 'Show': 'Mostra',
+ 'Hide': 'Nascondi',
+ 'completed tasks': 'attività completate',
+ 'Running': 'In esecuzione',
+ 'No tasks': 'Nessuna attività',
+ 'No duration': 'Nessuna durata',
+ 'No schedule': 'Nessuna data'}
+
+===== FILE: ./src/flow_state/i18n/locales/ja.py =====
+"""日本語. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'ja'
+NAME = '日本語'
+RTL = False
+QT_LOCALE = 'ja_JP'
+ORDER = 10
+
+MESSAGES = {'Home': 'ホーム',
+ 'Statistics': '統計',
+ 'Calendar': 'カレンダー',
+ 'Folders': 'フォルダー',
+ 'Settings': '設定',
+ 'Add Task': 'タスクを追加',
+ 'New task': '新しいタスク',
+ 'Current task': '現在のタスク',
+ 'Change': '変更',
+ 'Focus': '集中',
+ 'Short break': '短い休憩',
+ 'Long break': '長い休憩',
+ 'Start': '開始',
+ 'Pause': '一時停止',
+ 'Skip': 'スキップ',
+ 'Finish': '終了',
+ 'All tasks': 'すべてのタスク',
+ 'Today tasks': '今日のタスク',
+ 'All priorities': 'すべての優先度',
+ 'Unspecified': '未指定',
+ 'Low': '低',
+ 'Medium': '中',
+ 'High': '高',
+ 'Done': '完了',
+ 'Task': 'タスク',
+ 'Schedule': '期間',
+ 'Priority': '優先度',
+ 'Sessions': 'セッション',
+ 'Select': '選択',
+ 'Edit': '編集',
+ 'Delete': '削除',
+ 'Save': '保存',
+ 'Cancel': 'キャンセル',
+ 'Title:': 'タイトル：',
+ 'Estimated sessions:': '予定セッション：',
+ 'Set estimated sessions': '予定セッションを設定',
+ 'Set task duration': '期間を設定',
+ 'From:': '開始：',
+ 'To:': '終了：',
+ 'Time:': '時刻：',
+ 'Notes:': 'メモ：',
+ 'Statistics & Analytics': '統計と分析',
+ 'Total tasks': 'タスク合計',
+ 'Completed tasks': '完了タスク',
+ 'Overdue tasks': '期限超過タスク',
+ 'Completion rate': '完了率',
+ 'Total time': '合計時間',
+ 'Elapsed time': '経過時間',
+ 'Remaining time': '残り時間',
+ 'Time rate': '時間進捗',
+ 'Task completion': 'タスク完了度',
+ 'Focus time': '集中時間',
+ 'Calendar & daily tasks': 'カレンダーと日別タスク',
+ 'Automatic column sizing': '列幅の自動調整',
+ 'Appearance:': '外観：',
+ 'Language:': '言語：',
+ 'Light': 'ライト',
+ 'Dark': 'ダーク',
+ 'System': 'システム',
+ 'Show': '表示',
+ 'Hide': '非表示',
+ 'completed tasks': '完了タスク',
+ 'Running': '実行中',
+ 'No tasks': 'タスクなし',
+ 'No duration': '期間なし',
+ 'No schedule': '日付なし'}
+
+===== FILE: ./src/flow_state/i18n/locales/ko.py =====
+"""한국어. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'ko'
+NAME = '한국어'
+RTL = False
+QT_LOCALE = 'ko_KR'
+ORDER = 11
+
+MESSAGES = {'Home': '홈',
+ 'Statistics': '통계',
+ 'Calendar': '캘린더',
+ 'Folders': '폴더',
+ 'Settings': '설정',
+ 'Add Task': '작업 추가',
+ 'New task': '새 작업',
+ 'Current task': '현재 작업',
+ 'Change': '변경',
+ 'Focus': '집중',
+ 'Short break': '짧은 휴식',
+ 'Long break': '긴 휴식',
+ 'Start': '시작',
+ 'Pause': '일시정지',
+ 'Skip': '건너뛰기',
+ 'Finish': '종료',
+ 'All tasks': '모든 작업',
+ 'Today tasks': '오늘의 작업',
+ 'All priorities': '모든 우선순위',
+ 'Unspecified': '미지정',
+ 'Low': '낮음',
+ 'Medium': '보통',
+ 'High': '높음',
+ 'Done': '완료',
+ 'Task': '작업',
+ 'Schedule': '기간',
+ 'Priority': '우선순위',
+ 'Sessions': '세션',
+ 'Select': '선택',
+ 'Edit': '편집',
+ 'Delete': '삭제',
+ 'Save': '저장',
+ 'Cancel': '취소',
+ 'Title:': '제목:',
+ 'Estimated sessions:': '예상 세션:',
+ 'Set estimated sessions': '예상 세션 설정',
+ 'Set task duration': '작업 기간 설정',
+ 'From:': '시작:',
+ 'To:': '종료:',
+ 'Time:': '시간:',
+ 'Notes:': '메모:',
+ 'Statistics & Analytics': '통계 및 분석',
+ 'Total tasks': '전체 작업',
+ 'Completed tasks': '완료된 작업',
+ 'Overdue tasks': '기한 초과 작업',
+ 'Completion rate': '완료율',
+ 'Total time': '총 시간',
+ 'Elapsed time': '경과 시간',
+ 'Remaining time': '남은 시간',
+ 'Time rate': '시간 진행률',
+ 'Task completion': '작업 완료도',
+ 'Focus time': '집중 시간',
+ 'Calendar & daily tasks': '캘린더 및 일일 작업',
+ 'Automatic column sizing': '자동 열 너비',
+ 'Appearance:': '화면 모드:',
+ 'Language:': '언어:',
+ 'Light': '라이트',
+ 'Dark': '다크',
+ 'System': '시스템',
+ 'Show': '표시',
+ 'Hide': '숨기기',
+ 'completed tasks': '완료된 작업',
+ 'Running': '실행 중',
+ 'No tasks': '작업 없음',
+ 'No duration': '기간 없음',
+ 'No schedule': '날짜 없음'}
+
+===== FILE: ./src/flow_state/i18n/locales/pt.py =====
+"""Português. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'pt'
+NAME = 'Português'
+RTL = False
+QT_LOCALE = 'pt_PT'
+ORDER = 6
+
+MESSAGES = {'Home': 'Início',
+ 'Statistics': 'Estatísticas',
+ 'Calendar': 'Calendário',
+ 'Folders': 'Pastas',
+ 'Settings': 'Configurações',
+ 'Add Task': 'Adicionar tarefa',
+ 'New task': 'Nova tarefa',
+ 'Current task': 'Tarefa atual',
+ 'Change': 'Alterar',
+ 'Focus': 'Foco',
+ 'Short break': 'Pausa curta',
+ 'Long break': 'Pausa longa',
+ 'Start': 'Iniciar',
+ 'Pause': 'Pausar',
+ 'Skip': 'Pular',
+ 'Finish': 'Concluir',
+ 'All tasks': 'Todas as tarefas',
+ 'Today tasks': 'Tarefas de hoje',
+ 'All priorities': 'Todas as prioridades',
+ 'Unspecified': 'Não especificada',
+ 'Low': 'Baixa',
+ 'Medium': 'Média',
+ 'High': 'Alta',
+ 'Done': 'Concluída',
+ 'Task': 'Tarefa',
+ 'Schedule': 'Período',
+ 'Priority': 'Prioridade',
+ 'Sessions': 'Sessões',
+ 'Select': 'Selecionar',
+ 'Edit': 'Editar',
+ 'Delete': 'Excluir',
+ 'Save': 'Salvar',
+ 'Cancel': 'Cancelar',
+ 'Title:': 'Título:',
+ 'Estimated sessions:': 'Sessões estimadas:',
+ 'Set estimated sessions': 'Definir sessões estimadas',
+ 'Set task duration': 'Definir duração',
+ 'From:': 'De:',
+ 'To:': 'Até:',
+ 'Time:': 'Hora:',
+ 'Notes:': 'Notas:',
+ 'Statistics & Analytics': 'Estatísticas e análises',
+ 'Total tasks': 'Total de tarefas',
+ 'Completed tasks': 'Tarefas concluídas',
+ 'Overdue tasks': 'Tarefas atrasadas',
+ 'Completion rate': 'Taxa de conclusão',
+ 'Total time': 'Tempo total',
+ 'Elapsed time': 'Tempo decorrido',
+ 'Remaining time': 'Tempo restante',
+ 'Time rate': 'Progresso de tempo',
+ 'Task completion': 'Conclusão de tarefas',
+ 'Focus time': 'Tempo de foco',
+ 'Calendar & daily tasks': 'Calendário e tarefas diárias',
+ 'Automatic column sizing': 'Tamanho automático das colunas',
+ 'Appearance:': 'Aparência:',
+ 'Language:': 'Idioma:',
+ 'Light': 'Claro',
+ 'Dark': 'Escuro',
+ 'System': 'Sistema',
+ 'Show': 'Mostrar',
+ 'Hide': 'Ocultar',
+ 'completed tasks': 'tarefas concluídas',
+ 'Running': 'Em andamento',
+ 'No tasks': 'Sem tarefas',
+ 'No duration': 'Sem duração',
+ 'No schedule': 'Sem data'}
+
+===== FILE: ./src/flow_state/i18n/locales/ru.py =====
+"""Русский. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'ru'
+NAME = 'Русский'
+RTL = False
+QT_LOCALE = 'ru_RU'
+ORDER = 8
+
+MESSAGES = {'Home': 'Главная',
+ 'Statistics': 'Статистика',
+ 'Calendar': 'Календарь',
+ 'Folders': 'Папки',
+ 'Settings': 'Настройки',
+ 'Add Task': 'Добавить задачу',
+ 'New task': 'Новая задача',
+ 'Current task': 'Текущая задача',
+ 'Change': 'Изменить',
+ 'Focus': 'Фокус',
+ 'Short break': 'Короткий перерыв',
+ 'Long break': 'Длинный перерыв',
+ 'Start': 'Старт',
+ 'Pause': 'Пауза',
+ 'Skip': 'Пропустить',
+ 'Finish': 'Завершить',
+ 'All tasks': 'Все задачи',
+ 'Today tasks': 'Задачи на сегодня',
+ 'All priorities': 'Все приоритеты',
+ 'Unspecified': 'Не указано',
+ 'Low': 'Низкий',
+ 'Medium': 'Средний',
+ 'High': 'Высокий',
+ 'Done': 'Готово',
+ 'Task': 'Задача',
+ 'Schedule': 'Период',
+ 'Priority': 'Приоритет',
+ 'Sessions': 'Сессии',
+ 'Select': 'Выбрать',
+ 'Edit': 'Изменить',
+ 'Delete': 'Удалить',
+ 'Save': 'Сохранить',
+ 'Cancel': 'Отмена',
+ 'Title:': 'Название:',
+ 'Estimated sessions:': 'Ожидаемые сессии:',
+ 'Set estimated sessions': 'Задать ожидаемые сессии',
+ 'Set task duration': 'Задать период',
+ 'From:': 'С:',
+ 'To:': 'По:',
+ 'Time:': 'Время:',
+ 'Notes:': 'Заметки:',
+ 'Statistics & Analytics': 'Статистика и аналитика',
+ 'Total tasks': 'Всего задач',
+ 'Completed tasks': 'Выполненные задачи',
+ 'Overdue tasks': 'Просроченные задачи',
+ 'Completion rate': 'Процент выполнения',
+ 'Total time': 'Общее время',
+ 'Elapsed time': 'Прошедшее время',
+ 'Remaining time': 'Оставшееся время',
+ 'Time rate': 'Прогресс времени',
+ 'Task completion': 'Выполнение задач',
+ 'Focus time': 'Время фокуса',
+ 'Calendar & daily tasks': 'Календарь и ежедневные задачи',
+ 'Automatic column sizing': 'Авторазмер столбцов',
+ 'Appearance:': 'Оформление:',
+ 'Language:': 'Язык:',
+ 'Light': 'Светлая',
+ 'Dark': 'Тёмная',
+ 'System': 'Системная',
+ 'Show': 'Показать',
+ 'Hide': 'Скрыть',
+ 'completed tasks': 'выполненные задачи',
+ 'Running': 'Работает',
+ 'No tasks': 'Нет задач',
+ 'No duration': 'Без периода',
+ 'No schedule': 'Без даты'}
+
+===== FILE: ./src/flow_state/i18n/locales/tr.py =====
+"""Türkçe. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'tr'
+NAME = 'Türkçe'
+RTL = False
+QT_LOCALE = 'tr_TR'
+ORDER = 7
+
+MESSAGES = {'Home': 'Ana Sayfa',
+ 'Statistics': 'İstatistikler',
+ 'Calendar': 'Takvim',
+ 'Folders': 'Klasörler',
+ 'Settings': 'Ayarlar',
+ 'Add Task': 'Görev ekle',
+ 'New task': 'Yeni görev',
+ 'Current task': 'Geçerli görev',
+ 'Change': 'Değiştir',
+ 'Focus': 'Odak',
+ 'Short break': 'Kısa mola',
+ 'Long break': 'Uzun mola',
+ 'Start': 'Başlat',
+ 'Pause': 'Duraklat',
+ 'Skip': 'Atla',
+ 'Finish': 'Bitir',
+ 'All tasks': 'Tüm görevler',
+ 'Today tasks': 'Bugünün görevleri',
+ 'All priorities': 'Tüm öncelikler',
+ 'Unspecified': 'Belirtilmemiş',
+ 'Low': 'Düşük',
+ 'Medium': 'Orta',
+ 'High': 'Yüksek',
+ 'Done': 'Tamamlandı',
+ 'Task': 'Görev',
+ 'Schedule': 'Dönem',
+ 'Priority': 'Öncelik',
+ 'Sessions': 'Oturumlar',
+ 'Select': 'Seç',
+ 'Edit': 'Düzenle',
+ 'Delete': 'Sil',
+ 'Save': 'Kaydet',
+ 'Cancel': 'İptal',
+ 'Title:': 'Başlık:',
+ 'Estimated sessions:': 'Tahmini oturumlar:',
+ 'Set estimated sessions': 'Tahmini oturum belirle',
+ 'Set task duration': 'Görev süresini belirle',
+ 'From:': 'Başlangıç:',
+ 'To:': 'Bitiş:',
+ 'Time:': 'Saat:',
+ 'Notes:': 'Notlar:',
+ 'Statistics & Analytics': 'İstatistikler ve analizler',
+ 'Total tasks': 'Toplam görev',
+ 'Completed tasks': 'Tamamlanan görevler',
+ 'Overdue tasks': 'Geciken görevler',
+ 'Completion rate': 'Tamamlanma oranı',
+ 'Total time': 'Toplam süre',
+ 'Elapsed time': 'Geçen süre',
+ 'Remaining time': 'Kalan süre',
+ 'Time rate': 'Süre ilerlemesi',
+ 'Task completion': 'Görev tamamlanması',
+ 'Focus time': 'Odak süresi',
+ 'Calendar & daily tasks': 'Takvim ve günlük görevler',
+ 'Automatic column sizing': 'Otomatik sütun boyutu',
+ 'Appearance:': 'Görünüm:',
+ 'Language:': 'Dil:',
+ 'Light': 'Açık',
+ 'Dark': 'Koyu',
+ 'System': 'Sistem',
+ 'Show': 'Göster',
+ 'Hide': 'Gizle',
+ 'completed tasks': 'tamamlanan görevler',
+ 'Running': 'Çalışıyor',
+ 'No tasks': 'Görev yok',
+ 'No duration': 'Süre yok',
+ 'No schedule': 'Tarih yok'}
+
+===== FILE: ./src/flow_state/i18n/locales/zh.py =====
+"""简体中文. Keys are English (see en.py values). Missing keys fall back to English."""
+CODE = 'zh'
+NAME = '简体中文'
+RTL = False
+QT_LOCALE = 'zh_CN'
+ORDER = 9
+
+MESSAGES = {'Home': '主页',
+ 'Statistics': '统计',
+ 'Calendar': '日历',
+ 'Folders': '文件夹',
+ 'Settings': '设置',
+ 'Add Task': '添加任务',
+ 'New task': '新任务',
+ 'Current task': '当前任务',
+ 'Change': '更改',
+ 'Focus': '专注',
+ 'Short break': '短休息',
+ 'Long break': '长休息',
+ 'Start': '开始',
+ 'Pause': '暂停',
+ 'Skip': '跳过',
+ 'Finish': '结束',
+ 'All tasks': '所有任务',
+ 'Today tasks': '今日任务',
+ 'All priorities': '所有优先级',
+ 'Unspecified': '未指定',
+ 'Low': '低',
+ 'Medium': '中',
+ 'High': '高',
+ 'Done': '完成',
+ 'Task': '任务',
+ 'Schedule': '时间段',
+ 'Priority': '优先级',
+ 'Sessions': '专注次数',
+ 'Select': '选择',
+ 'Edit': '编辑',
+ 'Delete': '删除',
+ 'Save': '保存',
+ 'Cancel': '取消',
+ 'Title:': '标题：',
+ 'Estimated sessions:': '预计次数：',
+ 'Set estimated sessions': '设置预计次数',
+ 'Set task duration': '设置任务时间',
+ 'From:': '开始：',
+ 'To:': '结束：',
+ 'Time:': '时间：',
+ 'Notes:': '备注：',
+ 'Statistics & Analytics': '统计与分析',
+ 'Total tasks': '任务总数',
+ 'Completed tasks': '已完成任务',
+ 'Overdue tasks': '逾期任务',
+ 'Completion rate': '完成率',
+ 'Total time': '总时间',
+ 'Elapsed time': '已用时间',
+ 'Remaining time': '剩余时间',
+ 'Time rate': '时间进度',
+ 'Task completion': '任务完成度',
+ 'Focus time': '专注时间',
+ 'Calendar & daily tasks': '日历与每日任务',
+ 'Automatic column sizing': '自动调整列宽',
+ 'Appearance:': '外观：',
+ 'Language:': '语言：',
+ 'Light': '浅色',
+ 'Dark': '深色',
+ 'System': '跟随系统',
+ 'Show': '显示',
+ 'Hide': '隐藏',
+ 'completed tasks': '已完成任务',
+ 'Running': '运行中',
+ 'No tasks': '没有任务',
+ 'No duration': '无时间段',
+ 'No schedule': '无日期'}
+
+===== FILE: ./src/flow_state/paths.py =====
+"""Filesystem locations: user data directory and bundled resources."""
+import os
+import sys
+from pathlib import Path
+
+PACKAGE_DIR = Path(__file__).resolve().parent
+LEGACY_APP_DIR = Path.home() / ".focus-todo"
+
+
+def app_data_dir() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return base / "FlowState"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Flow State"
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "flow-state"
+
+
+APP_DIR = app_data_dir()
+DB_PATH = APP_DIR / "data.db"
+
+
+def resource_path(name: str) -> str:
+    """Path to a file in flow_state/resources (works with PyInstaller too)."""
+    if hasattr(sys, "_MEIPASS"):
+        return str(Path(sys._MEIPASS) / "flow_state" / "resources" / name)
+    return str(PACKAGE_DIR / "resources" / name)
+
+===== FILE: ./src/flow_state/services/__init__.py =====
+"""Business layer. The UI talks ONLY to these services, never to Database."""
+from flow_state.core.scoring import get_policy
+from flow_state.services.analytics_service import AnalyticsService
+from flow_state.services.focus_service import FocusService
+from flow_state.services.folder_service import FolderService
+from flow_state.services.settings_service import SettingsService
+from flow_state.services.task_service import TaskService
+
+
+class AppServices:
+    """Single container passed to every UI component."""
+
+    def __init__(self, db):
+        self.db = db
+        self.settings = SettingsService(db)
+        self.policy = get_policy(self.settings.get("scoring_policy", "default"))
+        self.folders = FolderService(db)
+        self.tasks = TaskService(db)
+        self.focus = FocusService(db, self.settings, self.policy)
+        self.analytics = AnalyticsService(db, self.settings, self.policy)
+
+    def reload_policy(self):
+        self.policy = get_policy(self.settings.get("scoring_policy", "default"))
+        self.focus.policy = self.policy
+        self.analytics.policy = self.policy
+
+    def close(self):
+        self.db.close()
+
+===== FILE: ./src/flow_state/services/analytics_service.py =====
+import datetime
+
+
+class AnalyticsService:
+    def __init__(self, db, settings, policy):
+        self.db = db
+        self.settings = settings
+        self.policy = policy
+
+    def summary(self):
+        raw = self.db.analytics_raw()
+        p = self.policy
+        total_minutes = p.estimated_minutes(raw["estimated_sessions"], self.settings.work_minutes())
+        elapsed = raw["focus_seconds"] / 60
+        elapsed_estimated = raw["estimated_focus_seconds"] / 60
+        return {
+            "total_tasks": raw["total_tasks"],
+            "done_tasks": raw["done_tasks"],
+            "task_rate": p.task_rate(raw["done_tasks"], raw["total_tasks"]),
+            "total_minutes": total_minutes,
+            "elapsed_minutes": elapsed,
+            "remaining_minutes": p.remaining_minutes(total_minutes, elapsed_estimated),
+            "time_rate": p.time_rate(elapsed_estimated, total_minutes),
+        }
+
+    def counts(self):
+        return self.db.task_counts()
+
+    def weekly(self):
+        """List of dicts: date, weekday (0=Sunday), completed_tasks, focus_minutes."""
+        result = []
+        for row in self.db.weekly_analytics():
+            d = datetime.date.fromisoformat(row["d"])
+            result.append({"date": d, "weekday": (d.weekday() + 1) % 7,
+                           "completed_tasks": int(row["completed_tasks"]),
+                           "focus_minutes": round(int(row["focus_seconds"]) / 60, 1)})
+        return result
+
+===== FILE: ./src/flow_state/services/focus_service.py =====
+class FocusService:
+    """Records focus periods using the active scoring policy."""
+
+    def __init__(self, db, settings, policy):
+        self.db = db
+        self.settings = settings
+        self.policy = policy
+
+    def work_seconds(self):
+        return self.settings.work_minutes() * 60
+
+    def record(self, task_id, fraction, work_seconds=None):
+        if task_id is None or fraction <= 0:
+            return None
+        result = self.policy.evaluate_session(fraction, work_seconds or self.work_seconds())
+        self.db.add_focus_session(task_id, result.fraction, result.focus_seconds, result.reward)
+        return result
+
+    def task_focus_seconds(self, task_id):
+        return self.db.get_task_focus_seconds(task_id)
+
+    def remaining_seconds(self, task, live_seconds=0):
+        """Seconds left on a task's estimate, or None if it has no estimate."""
+        if not task or task["estimated_sessions"] is None:
+            return None
+        estimated = int(task["estimated_sessions"]) * self.work_seconds()
+        return max(0, round(estimated - self.task_focus_seconds(task["id"]) - live_seconds))
+
+    def estimated_minutes(self, task):
+        if not task or task["estimated_sessions"] is None:
+            return None
+        return self.policy.estimated_minutes(task["estimated_sessions"], self.settings.work_minutes())
+
+===== FILE: ./src/flow_state/services/folder_service.py =====
+class FolderService:
+    def __init__(self, db):
+        self.db = db
+
+    def list(self):
+        return self.db.get_folders()
+
+    def add(self, name):
+        return self.db.add_folder(name)
+
+    def delete(self, folder_id):
+        self.db.delete_folder(folder_id)
+
+    def name(self, folder_id, default="كل المهام"):
+        return self.db.get_folder_name(folder_id) or default
+
+    def default_id(self):
+        folders = self.list()
+        return folders[0]["id"] if folders else None
+
+===== FILE: ./src/flow_state/services/settings_service.py =====
+class SettingsService:
+    def __init__(self, db):
+        self.db = db
+
+    def all(self) -> dict:
+        return self.db.get_settings()
+
+    def get(self, key, default=None):
+        return self.all().get(key, default)
+
+    def get_int(self, key, default):
+        try:
+            return int(self.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def work_minutes(self) -> int:
+        return max(1, self.get_int("work_duration", 25))
+
+    def set(self, key, value):
+        self.db.update_setting(key, value)
+
+    def update(self, values: dict):
+        self.db.update_settings(values)
+
+===== FILE: ./src/flow_state/services/task_service.py =====
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class TaskData:
+    """Values coming from the task editor."""
+    title: str
+    priority: int = -1
+    notes: str = ""
+    start_at: Optional[str] = None
+    end_at: Optional[str] = None
+    estimated_sessions: Optional[int] = None
+
+
+class TaskService:
+    def __init__(self, db):
+        self.db = db
+
+    # queries
+    def get(self, task_id):
+        return self.db.get_task(task_id)
+
+    def list(self, folder_id=None, priority=None, date_filter=None, selected_date=None, completed=None):
+        return self.db.get_tasks(folder_id, priority, date_filter, selected_date, completed)
+
+    def incomplete(self):
+        return [t for t in self.db.get_tasks() if not t["completed"]]
+
+    def current(self):
+        return self.db.get_current_task()
+
+    # commands
+    def create(self, folder_id, data: TaskData, parent_id=None):
+        return self.db.add_task(folder_id, data.title, data.priority, data.notes, data.start_at,
+                                data.end_at, data.estimated_sessions, parent_id)
+
+    def update(self, task_id, data: TaskData):
+        self.db.update_task(task_id, data.title, data.priority, data.notes, data.start_at,
+                            data.end_at, data.estimated_sessions)
+
+    def delete(self, task_id):
+        self.db.delete_task(task_id)
+
+    def set_completed(self, task_id, completed: bool):
+        self.db.set_completed(task_id, completed)
+
+    def set_current(self, task_id):
+        self.db.set_current_task(task_id)
+
+    def schedule_on_day(self, task_id, day_iso: str):
+        """Put an existing task on one calendar day (yyyy-MM-dd)."""
+        task = self.get(task_id)
+        if not task:
+            return
+        self.update(task_id, TaskData(task["title"], task["priority"], task["notes"] or "",
+                                      day_iso + "T00:00:00", day_iso + "T23:59:00",
+                                      task["estimated_sessions"]))
+
+    # ---- subtasks (data layer ready; UI can be added in a later increment)
+    def subtasks(self, parent_id):
+        return self.db.get_subtasks(parent_id)
+
+    def add_subtask(self, parent_id, title, priority=-1):
+        parent = self.get(parent_id)
+        if not parent:
+            return None
+        return self.create(parent["folder_id"], TaskData(title, priority), parent_id=parent_id)
+
+    def subtask_progress(self, parent_id):
+        subs = self.subtasks(parent_id)
+        done = sum(1 for s in subs if s["completed"])
+        return done, len(subs)
+
+===== FILE: ./src/flow_state/ui/__init__.py =====
+
+===== FILE: ./src/flow_state/ui/dialogs/__init__.py =====
+
+===== FILE: ./src/flow_state/ui/dialogs/choose_task_dialog.py =====
+from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout
+
+from flow_state.i18n import translate_tree
+
+
+class ChooseTaskDialog(QDialog):
+    """Pick one task from a list. Used by 'change current task' and the calendar."""
+
+    def __init__(self, tasks, title, prompt, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(prompt))
+        self.box = QComboBox()
+        for t in tasks:
+            self.box.addItem(t["title"], t["id"])
+        lay.addWidget(self.box)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+        translate_tree(self)
+
+    def selected_id(self):
+        return self.box.currentData()
+
+    @classmethod
+    def ask(cls, tasks, title, prompt, parent=None):
+        dialog = cls(tasks, title, prompt, parent)
+        return dialog.selected_id() if dialog.exec() == QDialog.Accepted else None
+
+===== FILE: ./src/flow_state/ui/dialogs/settings_dialog.py =====
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel,
+                               QSpinBox, QVBoxLayout)
+
+from flow_state.i18n import LANGUAGES, translate_tree
+
+SCORING_CHOICES = [("افتراضي (تقدم جزئي)", "default"), ("الجلسات الكاملة فقط", "full_sessions_only")]
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, settings_service, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("الإعدادات")
+        self.setMinimumWidth(460)
+        s = settings_service.all()
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+        self.work_duration = self.spin(1, 180, int(s.get("work_duration", 25)))
+        self.short_break = self.spin(1, 60, int(s.get("short_break", 5)))
+        self.long_break = self.spin(1, 120, int(s.get("long_break", 15)))
+        self.sessions = self.spin(1, 12, int(s.get("sessions_before_long_break", 4)))
+        self.theme = self.combo([("فاتح", "light"), ("داكن", "dark"), ("حسب النظام", "system")],
+                                s.get("theme_mode", "system"))
+        self.language = self.combo([(name, code) for code, name in LANGUAGES.items()], s.get("language", "ar"))
+        self.scoring = self.combo(SCORING_CHOICES, s.get("scoring_policy", "default"))
+        form.addRow("لغة التطبيق:", self.language)
+        form.addRow("مدة التركيز بالدقائق:", self.work_duration)
+        form.addRow("الاستراحة القصيرة:", self.short_break)
+        form.addRow("الاستراحة الطويلة:", self.long_break)
+        form.addRow("الجلسات قبل الاستراحة الطويلة:", self.sessions)
+        form.addRow("نظام الحساب:", self.scoring)
+        form.addRow("مظهر التطبيق:", self.theme)
+        lay.addLayout(form)
+        self.auto_columns = QCheckBox("الوضع التلقائي للأعمدة")
+        self.auto_columns.setChecked(s.get("auto_columns", "1") == "1")
+        lay.addWidget(self.auto_columns)
+        self.edit_layout = QCheckBox("تعديل النوافذ الداخلية بعد حفظ الإعدادات")
+        lay.addWidget(self.edit_layout)
+        note = QLabel("يمكنك شد الفواصل بين البطاقات في كل صفحة، ثم الضغط على «حفظ التخطيط».")
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        lay.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("حفظ")
+        buttons.button(QDialogButtonBox.Cancel).setText("إلغاء")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+        translate_tree(self)
+
+    @staticmethod
+    def spin(a, b, v):
+        x = QSpinBox()
+        x.setRange(a, b)
+        x.setValue(v)
+        return x
+
+    @staticmethod
+    def combo(items, current):
+        box = QComboBox()
+        for text, data in items:
+            box.addItem(text, data)
+        box.setCurrentIndex(max(0, box.findData(current)))
+        return box
+
+    def get_values(self):
+        return {
+            "work_duration": self.work_duration.value(),
+            "short_break": self.short_break.value(),
+            "long_break": self.long_break.value(),
+            "sessions_before_long_break": self.sessions.value(),
+            "theme_mode": self.theme.currentData(),
+            "language": self.language.currentData(),
+            "scoring_policy": self.scoring.currentData(),
+            "auto_columns": "1" if self.auto_columns.isChecked() else "0",
+        }
+
+    def wants_layout_edit(self):
+        return self.edit_layout.isChecked()
+
+===== FILE: ./src/flow_state/ui/dialogs/task_edit_dialog.py =====
+from PySide6.QtCore import QDate, QDateTime, Qt, QTime
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
+                               QLineEdit, QMessageBox, QSpinBox, QTextEdit, QTimeEdit, QVBoxLayout)
+
+from flow_state.i18n import language, tr, translate_tree
+from flow_state.services.task_service import TaskData
+from flow_state.ui.formatting import PRIORITY_CHOICES, locale_date_pattern
+
+
+class TaskEditDialog(QDialog):
+    def __init__(self, task=None, parent=None, default_date=None):
+        super().__init__(parent)
+        self.task = task
+        self.setWindowTitle("تعديل المهمة" if task else "إضافة مهمة")
+        self.setMinimumWidth(470)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.title_input = QLineEdit()
+        self.priority_combo = QComboBox()
+        for text, val in PRIORITY_CHOICES:
+            self.priority_combo.addItem(text, val)
+        self.estimate_enabled = QCheckBox("تحديد عدد دورات مقدر")
+        self.estimated_sessions = QSpinBox()
+        self.estimated_sessions.setRange(1, 999)
+        self.estimated_sessions.setEnabled(False)
+        self.estimate_enabled.toggled.connect(self.estimated_sessions.setEnabled)
+        self.notes_input = QTextEdit()
+        self.notes_input.setMaximumHeight(100)
+
+        self.has_due = QCheckBox("تحديد مدة للمهمة")
+        initial = default_date if default_date and default_date.isValid() else QDate.currentDate()
+        self.start_date = QDateEdit(initial)
+        self.due_date = QDateEdit(initial)
+        for edit in (self.start_date, self.due_date):
+            edit.setCalendarPopup(True)
+            edit.setDisplayFormat(locale_date_pattern())
+        self.due_time = QTimeEdit(QTime.currentTime().addSecs(3600))
+        self.due_time.setDisplayFormat("hh:mm AP" if language() == "en" else "HH:mm")
+        self.has_due.toggled.connect(self.set_due_enabled)
+        self.set_due_enabled(bool(default_date))
+        self.has_due.setChecked(bool(default_date))
+
+        if task:
+            self._load(task)
+
+        form.addRow("العنوان:", self.title_input)
+        form.addRow("الأولوية:", self.priority_combo)
+        form.addRow("", self.estimate_enabled)
+        form.addRow("الدورات المقدرة:", self.estimated_sessions)
+        form.addRow("", self.has_due)
+        form.addRow("من يوم:", self.start_date)
+        form.addRow("إلى يوم:", self.due_date)
+        form.addRow("الوقت:", self.due_time)
+        form.addRow("ملاحظات:", self.notes_input)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("حفظ")
+        buttons.button(QDialogButtonBox.Cancel).setText("إلغاء")
+        buttons.accepted.connect(self.validate)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        translate_tree(self)
+
+    def _load(self, task):
+        self.title_input.setText(task["title"])
+        self.priority_combo.setCurrentIndex(max(0, self.priority_combo.findData(task["priority"])))
+        self.notes_input.setPlainText(task["notes"] or "")
+        if task["estimated_sessions"] is not None:
+            self.estimated_sessions.setValue(int(task["estimated_sessions"]))
+            self.estimate_enabled.setChecked(True)
+        if task["end_at"] or task["due_at"]:
+            start = QDateTime.fromString(task["start_at"] or task["due_at"], Qt.ISODate)
+            end = QDateTime.fromString(task["end_at"] or task["due_at"], Qt.ISODate)
+            if start.isValid() and end.isValid():
+                self.start_date.setDate(start.date())
+                self.due_date.setDate(end.date())
+                self.due_time.setTime(end.time())
+                self.has_due.setChecked(True)
+
+    def set_due_enabled(self, enabled):
+        for w in (self.start_date, self.due_date, self.due_time):
+            w.setEnabled(enabled)
+
+    def validate(self):
+        if not self.title_input.text().strip():
+            QMessageBox.warning(self, tr("بيانات ناقصة"), tr("اكتب عنوان المهمة."))
+            return
+        if self.has_due.isChecked() and self.start_date.date() > self.due_date.date():
+            QMessageBox.warning(self, tr("مدة غير صحيحة"), tr("تاريخ البداية يجب أن يسبق تاريخ النهاية."))
+            return
+        self.accept()
+
+    def data(self) -> TaskData:
+        start = end = None
+        if self.has_due.isChecked():
+            start = QDateTime(self.start_date.date(), QTime(0, 0)).toString(Qt.ISODate)
+            end = QDateTime(self.due_date.date(), self.due_time.time()).toString(Qt.ISODate)
+        return TaskData(
+            title=self.title_input.text().strip(),
+            priority=self.priority_combo.currentData(),
+            notes=self.notes_input.toPlainText(),
+            start_at=start,
+            end_at=end,
+            estimated_sessions=self.estimated_sessions.value() if self.estimate_enabled.isChecked() else None,
+        )
+
+===== FILE: ./src/flow_state/ui/formatting.py =====
+"""Display helpers shared by all pages (dates, durations, sessions, priority)."""
+from PySide6.QtCore import QDateTime, QLocale, Qt
+
+from flow_state.i18n import qt_locale_name, tr
+
+PRIORITY_LABELS = {2: "عالية", 1: "متوسطة", 0: "منخفضة", -1: "غير محددة"}
+PRIORITY_CHOICES = [("غير محددة", -1), ("منخفضة", 0), ("متوسطة", 1), ("عالية", 2)]
+WEEKDAYS = ["أحد", "اثنين", "ثلاثاء", "أربعاء", "خميس", "جمعة", "سبت"]  # Sunday = 0
+
+
+def current_locale():
+    return QLocale(qt_locale_name())
+
+
+def locale_date_pattern():
+    return current_locale().dateFormat(QLocale.ShortFormat)
+
+
+def priority_label(value):
+    return PRIORITY_LABELS.get(value, "غير محددة")
+
+
+def format_minutes(value, short=False):
+    value = max(0, round(float(value or 0)))
+    hours, minutes = divmod(value, 60)
+    if short:
+        if hours and minutes:
+            return f"{hours} س {minutes} د"
+        return f"{hours} ساعة" if hours else f"{minutes} دقيقة"
+    if hours and minutes:
+        return f"{hours} ساعة و{minutes} دقيقة"
+    return f"{hours} ساعة" if hours else f"{minutes} دقيقة"
+
+
+def format_hms(seconds):
+    hours, rest = divmod(max(0, int(seconds)), 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def format_sessions(task):
+    done = float(task["completed_sessions"] or 0)
+    done_text = f"{done:.2f}" if done % 1 else str(int(done))
+    estimated = task["estimated_sessions"]
+    return f"{done_text} / {int(estimated)} 🍅" if estimated is not None else f"{done_text} 🍅"
+
+
+def format_range(task):
+    start = task["start_at"] or task["due_at"]
+    end = task["end_at"] or task["due_at"]
+    if not end:
+        return tr("بدون مدة")
+    sd = QDateTime.fromString(start, Qt.ISODate)
+    ed = QDateTime.fromString(end, Qt.ISODate)
+    loc = current_locale()
+    return f"{loc.toString(sd.date(), QLocale.ShortFormat)} ← {loc.toString(ed.date(), QLocale.ShortFormat)}"
+
+===== FILE: ./src/flow_state/ui/main_window.py =====
+import json
+
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtMultimedia import QSoundEffect
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
+                               QSplitter, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
+
+from flow_state import APP_NAME
+from flow_state.core.timer import PomodoroTimer
+from flow_state.i18n import set_language, tr, translate_tree
+from flow_state.paths import resource_path
+from flow_state.ui.dialogs.settings_dialog import SettingsDialog
+from flow_state.ui.pages.analytics_page import AnalyticsPage
+from flow_state.ui.pages.calendar_page import CalendarPage
+from flow_state.ui.pages.home_page import HomePage
+from flow_state.ui.theme import apply_theme
+from flow_state.ui.widgets.folder_panel import FolderPanel
+
+PAGE_HOME, PAGE_ANALYTICS, PAGE_CALENDAR = range(3)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, services):
+        super().__init__()
+        self.services = services
+        self.tray_controller = None
+        self.setWindowTitle(APP_NAME)
+        self.resize(1400, 860)
+        self.setMinimumSize(1080, 700)
+        self.timer = PomodoroTimer(services.settings.all(), services.policy)
+        self.sound = QSoundEffect()
+        self.sound.setSource(QUrl.fromLocalFile(resource_path("bell.wav")))
+        self.sound.setVolume(.8)
+        self.build_ui()
+        self.connect_signals()
+        self.load_layouts()
+        self.set_layout_editing(False, announce=False)
+        self.refresh_all()
+        self.home.show_mode(self.timer.mode)
+        self.timer.emit_state()
+        self.home.show_running(False)
+        translate_tree(self)
+
+    # ---------------------------------------------------------------- UI
+    def build_ui(self):
+        root_widget = QWidget()
+        root_widget.setObjectName("appRoot")
+        root = QHBoxLayout(root_widget)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(12)
+        side = self._build_sidebar()
+        self.pages = QStackedWidget()
+        self.home = HomePage(self.services)
+        self.analytics = AnalyticsPage(self.services)
+        self.calendar_page = CalendarPage(self.services)
+        for page in (self.home, self.analytics, self.calendar_page):
+            self.pages.addWidget(page)
+        self.task_list = self.home.task_list
+        self.app_splitter = QSplitter(Qt.Horizontal)
+        self.app_splitter.setChildrenCollapsible(False)
+        self.app_splitter.addWidget(side)
+        self.app_splitter.addWidget(self.pages)
+        self.app_splitter.setSizes([352, 1048])
+        root.addWidget(self.app_splitter)
+        self.setCentralWidget(root_widget)
+        self.switch_page(PAGE_HOME)
+
+    def _build_sidebar(self):
+        side = QFrame()
+        side.setObjectName("sidePanel")
+        side.setMinimumWidth(260)
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(18, 22, 18, 18)
+        sl.setSpacing(10)
+        brand = QLabel("◉  " + APP_NAME)
+        brand.setObjectName("brand")
+        sub = QLabel("خطط بوضوح، ركّز بعمق")
+        sub.setObjectName("brandSub")
+        sl.addWidget(brand)
+        sl.addWidget(sub)
+        sl.addSpacing(22)
+        self.nav = []
+        for text, index in [("⌂  الصفحة الرئيسية", PAGE_HOME), ("▥  الإحصائيات", PAGE_ANALYTICS),
+                            ("▦  التقويم", PAGE_CALENDAR)]:
+            b = QPushButton(text)
+            b.setObjectName("nav")
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, i=index: self.switch_page(i))
+            self.nav.append(b)
+            sl.addWidget(b)
+        self.folders_button = QPushButton("▤  المجلدات")
+        self.folders_button.setObjectName("nav")
+        self.folders_button.setCheckable(True)
+        sl.addWidget(self.folders_button)
+        self.folder_popup = QFrame()
+        self.folder_popup.setObjectName("card")
+        popup_lay = QVBoxLayout(self.folder_popup)
+        popup_lay.setContentsMargins(4, 4, 4, 4)
+        self.folder_panel = FolderPanel(self.services)
+        popup_lay.addWidget(self.folder_panel)
+        self.folder_popup.hide()
+        sl.addWidget(self.folder_popup)
+        sl.addStretch()
+        self.save_layout_button = QPushButton("✓  حفظ التخطيط")
+        self.save_layout_button.setObjectName("primary")
+        self.save_layout_button.hide()
+        sl.addWidget(self.save_layout_button)
+        self.settings_button = QPushButton("⚙  الإعدادات")
+        self.settings_button.setObjectName("nav")
+        sl.addWidget(self.settings_button)
+        return side
+
+    def connect_signals(self):
+        h, t = self.home, self.timer
+        self.settings_button.clicked.connect(self.open_settings)
+        self.save_layout_button.clicked.connect(self.save_layouts)
+        self.folders_button.clicked.connect(self.toggle_folders)
+        self.folder_panel.folder_selected.connect(self.select_folder)
+        self.folder_panel.folders_changed.connect(self.refresh_all)
+        h.change_task_button.clicked.connect(self.task_list.choose_current_task)
+        h.start_button.clicked.connect(t.start)
+        h.pause_button.clicked.connect(t.pause)
+        h.skip_button.clicked.connect(t.skip)
+        h.reset_button.clicked.connect(t.finish_early)
+        for mode, b in h.mode_buttons.items():
+            b.clicked.connect(lambda _=False, m=mode: t.set_mode(m))
+        t.tick.connect(self.on_tick)
+        t.mode_changed.connect(lambda mode, _sessions: h.show_mode(mode))
+        t.finished.connect(self.on_finished)
+        t.running_changed.connect(h.show_running)
+        t.period_ended.connect(self.record_period)
+        for lst in (self.task_list, self.calendar_page.tasks):
+            lst.task_changed.connect(self.refresh_all)
+            lst.current_task_changed.connect(self.refresh_all)
+
+    # ---------------------------------------------------------- navigation
+    def toggle_folders(self, checked):
+        self.folder_popup.setVisible(checked)
+        self.folders_button.setText(("▾  " if checked else "▤  ") + tr("المجلدات"))
+
+    def select_folder(self, folder_id):
+        self.switch_page(PAGE_HOME)
+        self.task_list.set_folder(folder_id)
+        self.task_list.filter_label.setText(self.services.folders.name(folder_id, tr("كل المهام")))
+
+    def switch_page(self, index):
+        self.pages.setCurrentIndex(index)
+        for i, b in enumerate(self.nav):
+            b.setChecked(i == index)
+        if index == PAGE_ANALYTICS:
+            self.analytics.refresh()
+        elif index == PAGE_CALENDAR:
+            self.calendar_page.refresh()
+
+    def refresh_all(self):
+        self.home.show_task(self.services.tasks.current())
+        self.update_remaining_time()
+        self.task_list.reload_tasks()
+        self.analytics.refresh()
+        self.calendar_page.refresh()
+        translate_tree(self)
+
+    # --------------------------------------------------------------- timer
+    def live_focus_seconds(self):
+        if self.timer.mode != "work":
+            return 0
+        return max(0, self.timer.duration_for_mode("work") - self.timer.remaining_seconds)
+
+    def update_remaining_time(self):
+        task = self.services.tasks.current()
+        self.home.show_remaining(self.services.focus.remaining_seconds(task, self.live_focus_seconds()))
+
+    def record_period(self, mode, fraction):
+        if mode != "work" or fraction <= 0:
+            return
+        task = self.services.tasks.current()
+        if task:
+            self.services.focus.record(task["id"], fraction, self.timer.duration_for_mode("work"))
+            self.refresh_all()
+
+    def on_tick(self, text, seconds):
+        self.home.show_time(text, seconds / max(1, self.timer.duration_for_mode(self.timer.mode)))
+        self.update_remaining_time()
+
+    def on_finished(self, old_mode):
+        if self.sound.status() == QSoundEffect.Ready:
+            self.sound.play()
+        msg = "انتهت جلسة التركيز، حان وقت الراحة." if old_mode == "work" else "انتهت الراحة، لنعد إلى التركيز."
+        self.statusBar().showMessage(tr(msg), 5000)
+
+    # ------------------------------------------------------------ settings
+    def open_settings(self):
+        dialog = SettingsDialog(self.services.settings, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        values = dialog.get_values()
+        set_language(values["language"])
+        self.services.settings.update(values)
+        self.services.reload_policy()
+        self.timer.policy = self.services.policy
+        self.timer.update_settings(self.services.settings.all())
+        self.timer.reset_current_period()
+        apply_theme(QApplication.instance(), values["theme_mode"])
+        self.task_list.apply_column_mode()
+        self.calendar_page.tasks.apply_column_mode()
+        self.refresh_all()
+        self.home.show_running(self.timer.is_running())
+        if self.tray_controller:
+            self.tray_controller.retranslate()
+        if dialog.wants_layout_edit():
+            self.set_layout_editing(True)
+
+    # -------------------------------------------------------------- layout
+    def set_layout_editing(self, enabled, announce=True):
+        self.home.set_layout_editing(enabled)
+        self.analytics.set_layout_editing(enabled)
+        self.calendar_page.set_layout_editing(enabled)
+        self.save_layout_button.setVisible(enabled)
+        if announce:
+            msg = ("وضع تعديل التخطيط: اسحب الفواصل داخل كل صفحة ثم اضغط حفظ التخطيط."
+                   if enabled else "تم حفظ التخطيط.")
+            self.statusBar().showMessage(tr(msg), 5000)
+
+    def save_layouts(self):
+        data = {"app": self.app_splitter.sizes(), **self.home.layout_sizes(),
+                "analytics": self.analytics.layout_sizes(), "calendar": self.calendar_page.layout_sizes()}
+        self.services.settings.set("window_layouts", json.dumps(data))
+        self.set_layout_editing(False)
+
+    def load_layouts(self):
+        raw = self.services.settings.get("window_layouts", "")
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+            self.app_splitter.setSizes(data.get("app", [352, 1048]))
+            self.home.apply_layout_sizes(data)
+            self.analytics.apply_layout_sizes(data.get("analytics"))
+            self.calendar_page.apply_layout_sizes(data.get("calendar"))
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    # ------------------------------------------------------------ shutdown
+    def _shutdown(self):
+        self.task_list.save_column_widths()
+        self.calendar_page.tasks.save_column_widths()
+        self.timer.pause()
+        self.services.close()
+
+    def closeEvent(self, event):
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            event.ignore()
+            self.hide()
+        else:
+            self._shutdown()
+            event.accept()
+
+    def close_application(self):
+        self._shutdown()
+        QApplication.quit()
+
+===== FILE: ./src/flow_state/ui/pages/__init__.py =====
+
+===== FILE: ./src/flow_state/ui/pages/analytics_page.py =====
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QPushButton, QSplitter, QVBoxLayout, QWidget
+
+from flow_state.i18n import tr, translate_tree
+from flow_state.ui.formatting import WEEKDAYS, format_minutes
+from flow_state.ui.theme import ACCENTS
+from flow_state.ui.widgets.charts import DonutChart, StatCard, WeeklyChart
+
+
+class AnalyticsPage(QWidget):
+    def __init__(self, services):
+        super().__init__()
+        self.analytics = services.analytics
+        self.weekly_mode = "tasks"
+        self.donut_mode = "tasks"
+        lay = QVBoxLayout(self)
+        title = QLabel("الإحصائيات والتحليلات")
+        title.setObjectName("brand")
+        lay.addWidget(title)
+
+        self.total = StatCard("إجمالي المهام", ACCENTS["blue"])
+        self.done = StatCard("المهام المنجزة", ACCENTS["green"])
+        self.overdue = StatCard("المهام المتأخرة", ACCENTS["red"])
+        self.rate = StatCard("معدل الإنجاز", ACCENTS["orange"])
+        lay.addLayout(self._row(self.total, self.done, self.overdue, self.rate))
+        self.total_time = StatCard("إجمالي الوقت", ACCENTS["blue"])
+        self.elapsed_time = StatCard("الوقت المنقضي", ACCENTS["green"])
+        self.remaining_time = StatCard("الوقت المتبقي", ACCENTS["orange"])
+        self.time_rate = StatCard("معدل الوقت", ACCENTS["primary"])
+        lay.addLayout(self._row(self.total_time, self.elapsed_time, self.remaining_time, self.time_rate))
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        weekly_card, self.weekly_toggle, self.weekly = self._chart_card(WeeklyChart(), self.toggle_weekly)
+        donut_card, self.donut_toggle, self.donut = self._chart_card(DonutChart(), self.toggle_donut)
+        self.splitter.addWidget(weekly_card)
+        self.splitter.addWidget(donut_card)
+        self.splitter.setSizes([700, 350])
+        lay.addWidget(self.splitter, 1)
+        self.refresh()
+
+    @staticmethod
+    def _row(*cards):
+        grid = QGridLayout()
+        for i, card in enumerate(cards):
+            grid.addWidget(card, 0, i)
+        return grid
+
+    @staticmethod
+    def _chart_card(chart, on_toggle):
+        card = QFrame()
+        card.setObjectName("card")
+        lay = QVBoxLayout(card)
+        toggle = QPushButton()
+        toggle.setObjectName("nav")
+        toggle.clicked.connect(on_toggle)
+        lay.addWidget(toggle)
+        lay.addWidget(chart)
+        return card, toggle, chart
+
+    def toggle_weekly(self):
+        self.weekly_mode = "time" if self.weekly_mode == "tasks" else "tasks"
+        self.refresh()
+
+    def toggle_donut(self):
+        self.donut_mode = "time" if self.donut_mode == "tasks" else "tasks"
+        self.refresh()
+
+    def refresh(self):
+        s = self.analytics.summary()
+        counts = self.analytics.counts()
+        self.total.value.setText(str(s["total_tasks"]))
+        self.done.value.setText(str(s["done_tasks"]))
+        self.overdue.value.setText(str(counts["overdue"]))
+        self.rate.value.setText(f"{s['task_rate']}%")
+        self.total_time.value.setText(format_minutes(s["total_minutes"], short=True))
+        self.elapsed_time.value.setText(format_minutes(s["elapsed_minutes"], short=True))
+        self.remaining_time.value.setText(format_minutes(s["remaining_minutes"], short=True))
+        self.time_rate.value.setText(f"{s['time_rate']}%")
+
+        days = self.analytics.weekly()
+        labels = [tr(WEEKDAYS[d["weekday"]]) for d in days]
+        if self.weekly_mode == "tasks":
+            self.weekly_toggle.setText("▼ المهام المكتملة")
+            self.weekly.set_data([d["completed_tasks"] for d in days], labels, "", ACCENTS["primary"])
+        else:
+            self.weekly_toggle.setText("▲ وقت التركيز")
+            self.weekly.set_data([d["focus_minutes"] for d in days], labels, tr("د"), ACCENTS["green"])
+        if self.donut_mode == "tasks":
+            self.donut_toggle.setText("▼ إنجاز المهام")
+            self.donut.set_data(s["task_rate"], tr("إنجاز المهام"), ACCENTS["green"])
+        else:
+            self.donut_toggle.setText("▲ الوقت المنقضي")
+            self.donut.set_data(s["time_rate"], tr("الوقت المنقضي"), ACCENTS["primary"])
+        translate_tree(self)
+
+    # layout persistence
+    def set_layout_editing(self, enabled):
+        self.splitter.setHandleWidth(9 if enabled else 2)
+
+    def layout_sizes(self):
+        return self.splitter.sizes()
+
+    def apply_layout_sizes(self, sizes):
+        if sizes and len(sizes) == 2:
+            self.splitter.setSizes(sizes)
+
+===== FILE: ./src/flow_state/ui/pages/calendar_page.py =====
+from PySide6.QtCore import QDate
+from PySide6.QtGui import QColor, QTextCharFormat
+from PySide6.QtWidgets import (QCalendarWidget, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSplitter,
+                               QVBoxLayout, QWidget)
+
+from flow_state.i18n import tr, translate_tree
+from flow_state.ui.dialogs.choose_task_dialog import ChooseTaskDialog
+from flow_state.ui.widgets.task_list import TaskList
+
+
+class CalendarPage(QWidget):
+    def __init__(self, services):
+        super().__init__()
+        self.services = services
+        lay = QVBoxLayout(self)
+        head = QHBoxLayout()
+        title = QLabel("التقويم والمهام اليومية")
+        title.setObjectName("brand")
+        self.add = QPushButton("＋ مهمة جديدة")
+        self.add.setObjectName("primary")
+        self.from_list = QPushButton("إضافة من قائمة المهام")
+        head.addWidget(title)
+        head.addStretch()
+        head.addWidget(self.from_list)
+        head.addWidget(self.add)
+        lay.addLayout(head)
+
+        self.splitter = QSplitter()
+        self.splitter.setChildrenCollapsible(False)
+        cal_card = QFrame()
+        cal_card.setObjectName("card")
+        cl = QVBoxLayout(cal_card)
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        self.apply_today_style()
+        cl.addWidget(self.calendar)
+        tasks_card = QFrame()
+        tasks_card.setObjectName("card")
+        tl = QVBoxLayout(tasks_card)
+        self.date_title = QLabel("مهام اليوم")
+        self.date_title.setObjectName("sectionTitle")
+        tl.addWidget(self.date_title)
+        self.tasks = TaskList(services, compact=True)
+        tl.addWidget(self.tasks)
+        self.splitter.addWidget(cal_card)
+        self.splitter.addWidget(tasks_card)
+        self.splitter.setSizes([420, 760])
+        lay.addWidget(self.splitter, 1)
+
+        self.calendar.clicked.connect(self.select_date)
+        self.add.clicked.connect(lambda: self.tasks.open_add_dialog(self.calendar.selectedDate()))
+        self.from_list.clicked.connect(self.assign_existing_task)
+        self.tasks.task_changed.connect(self.refresh)
+        self.select_date(QDate.currentDate())
+
+    def apply_today_style(self):
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#ede9fe"))
+        fmt.setForeground(QColor("#4f46e5"))
+        fmt.setFontWeight(700)
+        self.calendar.setDateTextFormat(QDate.currentDate(), fmt)
+
+    def select_date(self, date):
+        self.date_title.setText(tr("مهام يوم ") + date.toString("yyyy-MM-dd"))
+        self.tasks.set_selected_date(date)
+        translate_tree(self)
+
+    def assign_existing_task(self):
+        rows = self.services.tasks.incomplete()
+        if not rows:
+            QMessageBox.information(self, tr("لا توجد مهام"), tr("لا توجد مهام غير مكتملة في قائمة المهام."))
+            return
+        task_id = ChooseTaskDialog.ask(rows, "إضافة من قائمة المهام", "اختر مهمة لإضافتها إلى اليوم المحدد:", self)
+        if task_id is not None:
+            self.services.tasks.schedule_on_day(task_id, self.calendar.selectedDate().toString("yyyy-MM-dd"))
+            self.refresh()
+            self.tasks.task_changed.emit()
+
+    def refresh(self):
+        self.tasks.reload_tasks()
+        translate_tree(self)
+
+    def set_layout_editing(self, enabled):
+        self.splitter.setHandleWidth(9 if enabled else 2)
+
+    def layout_sizes(self):
+        return self.splitter.sizes()
+
+    def apply_layout_sizes(self, sizes):
+        if sizes and len(sizes) == 2:
+            self.splitter.setSizes(sizes)
+
+===== FILE: ./src/flow_state/ui/pages/home_page.py =====
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter, QStackedLayout, QVBoxLayout,
+                               QWidget)
+
+from flow_state.i18n import tr
+from flow_state.ui.formatting import format_hms, format_minutes, format_range, format_sessions, priority_label
+from flow_state.ui.widgets.task_list import TaskList
+from flow_state.ui.widgets.timer_ring import TimerRing
+
+MODE_LABELS = {"work": "تركيز", "short_break": "استراحة قصيرة", "long_break": "استراحة طويلة"}
+
+
+def card():
+    w = QFrame()
+    w.setObjectName("card")
+    return w
+
+
+class HomePage(QWidget):
+    """Current task card + timer + task list. Pure view: no timer logic here."""
+
+    def __init__(self, services):
+        super().__init__()
+        self.services = services
+        lay = QVBoxLayout(self)
+        header = QHBoxLayout()
+        title = QLabel("الصفحة الرئيسية")
+        title.setObjectName("brand")
+        self.add_button = QPushButton("＋ إضافة مهمة")
+        self.add_button.setObjectName("primary")
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.add_button)
+        lay.addLayout(header)
+
+        self.outer_splitter = QSplitter(Qt.Vertical)
+        self.outer_splitter.setChildrenCollapsible(False)
+        self.upper_splitter = QSplitter(Qt.Horizontal)
+        self.upper_splitter.setChildrenCollapsible(False)
+        self.upper_splitter.addWidget(self._build_current_card())
+        self.upper_splitter.addWidget(self._build_timer_card())
+        self.upper_splitter.setSizes([650, 430])
+        self.outer_splitter.addWidget(self.upper_splitter)
+
+        tasks_card = card()
+        task_l = QVBoxLayout(tasks_card)
+        self.task_list = TaskList(services)
+        task_l.addWidget(self.task_list)
+        self.outer_splitter.addWidget(tasks_card)
+        self.outer_splitter.setSizes([330, 470])
+        lay.addWidget(self.outer_splitter, 1)
+        self.add_button.clicked.connect(lambda: self.task_list.open_add_dialog())
+
+    def _build_current_card(self):
+        current = card()
+        cur = QVBoxLayout(current)
+        row = QHBoxLayout()
+        t = QLabel("◎ المهمة الحالية")
+        t.setObjectName("sectionTitle")
+        self.change_task_button = QPushButton("✎ تغيير")
+        row.addWidget(t)
+        row.addStretch()
+        row.addWidget(self.change_task_button)
+        cur.addLayout(row)
+        self.current_title = QLabel()
+        self.current_title.setObjectName("focusTitle")
+        self.current_title.setWordWrap(True)
+        self.current_due = QLabel()
+        self.current_due.setObjectName("muted")
+        self.current_priority = QLabel()
+        self.current_sessions = QLabel()
+        self.current_sessions.setObjectName("sectionTitle")
+        self.current_estimate = QLabel()
+        self.current_estimate.setObjectName("muted")
+        self.current_remaining = QLabel()
+        self.current_remaining.setObjectName("sectionTitle")
+        for w in (self.current_title, self.current_due, self.current_priority, self.current_sessions,
+                  self.current_estimate, self.current_remaining):
+            cur.addWidget(w)
+        cur.addStretch()
+        self.show_task(None)
+        return current
+
+    def _build_timer_card(self):
+        timer_card = card()
+        tl = QVBoxLayout(timer_card)
+        tabs = QHBoxLayout()
+        self.mode_buttons = {}
+        for mode, text in MODE_LABELS.items():
+            b = QPushButton(text)
+            self.mode_buttons[mode] = b
+            tabs.addWidget(b)
+        tl.addLayout(tabs)
+        ring = QWidget()
+        stack = QStackedLayout(ring)
+        stack.setStackingMode(QStackedLayout.StackAll)
+        self.ring = TimerRing()
+        stack.addWidget(self.ring)
+        overlay = QWidget()
+        ov = QVBoxLayout(overlay)
+        ov.setAlignment(Qt.AlignCenter)
+        self.mode_label = QLabel("تركيز")
+        self.time_label = QLabel("25:00")
+        self.time_label.setObjectName("timerText")
+        self.start_button = QPushButton("▶ ابدأ")
+        self.start_button.setObjectName("primary")
+        ov.addStretch()
+        ov.addWidget(self.mode_label, 0, Qt.AlignCenter)
+        ov.addWidget(self.time_label, 0, Qt.AlignCenter)
+        ov.addWidget(self.start_button, 0, Qt.AlignCenter)
+        ov.addStretch()
+        stack.addWidget(overlay)
+        stack.setCurrentWidget(overlay)
+        tl.addWidget(ring, 1)
+        controls = QHBoxLayout()
+        self.pause_button = QPushButton("Ⅱ إيقاف")
+        self.skip_button = QPushButton("⏭ تخطي")
+        self.reset_button = QPushButton("■ إنهاء")
+        for b in (self.pause_button, self.skip_button, self.reset_button):
+            controls.addWidget(b)
+        tl.addLayout(controls)
+        return timer_card
+
+    # ------------------------------------------------------------ display
+    def show_task(self, task):
+        if not task:
+            self.current_title.setText(tr("اختر مهمة وابدأ التركيز"))
+            self.current_due.setText(tr("بدون موعد"))
+            self.current_priority.setText(tr("الأولوية: ") + tr("غير محددة"))
+            self.current_sessions.setText("0 🍅")
+            self.current_estimate.setText(tr("الوقت المقدر: غير محدد"))
+            self.current_remaining.setText(tr("الوقت المتبقي: غير محدد"))
+            return
+        self.current_title.setText(task["title"])
+        self.current_priority.setText(tr("الأولوية: ") + tr(priority_label(task["priority"])))
+        self.current_due.setText(tr("المدة: ") + format_range(task))
+        self.current_sessions.setText(format_sessions(task))
+        minutes = self.services.focus.estimated_minutes(task)
+        self.current_estimate.setText(tr("الوقت المقدر: ") + format_minutes(minutes) if minutes is not None
+                                      else tr("الوقت المقدر: غير محدد"))
+
+    def show_remaining(self, seconds):
+        self.current_remaining.setText(tr("الوقت المتبقي: غير محدد") if seconds is None
+                                       else tr("الوقت المتبقي: ") + format_hms(seconds))
+
+    def show_running(self, running):
+        self.start_button.setEnabled(not running)
+        self.start_button.setText(tr("يعمل الآن") if running else "▶ " + tr("ابدأ"))
+        self.pause_button.setEnabled(running)
+
+    def show_mode(self, mode):
+        self.mode_label.setText(tr(MODE_LABELS.get(mode, mode)))
+
+    def show_time(self, text, progress):
+        self.time_label.setText(text)
+        self.ring.set_progress(progress)
+
+    # ------------------------------------------------------------- layout
+    def set_layout_editing(self, enabled):
+        for s in (self.outer_splitter, self.upper_splitter):
+            s.setHandleWidth(9 if enabled else 2)
+
+    def layout_sizes(self):
+        return {"home_outer": self.outer_splitter.sizes(), "home_upper": self.upper_splitter.sizes()}
+
+    def apply_layout_sizes(self, data):
+        self.outer_splitter.setSizes(data.get("home_outer", [330, 470]))
+        self.upper_splitter.setSizes(data.get("home_upper", [650, 430]))
+
+===== FILE: ./src/flow_state/ui/theme.py =====
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette
+
+LIGHT = {
+    "bg": "#f7f8fc", "surface": "#ffffff", "surface2": "#f3f5fb", "text": "#11162d",
+    "muted": "#6d7690", "border": "#e5e8f2", "primary": "#5964ed", "primary2": "#777ffc",
+    "success": "#17a673", "warning": "#f39a32", "danger": "#ef5261", "shadow": "#dfe3f0",
+}
+DARK = {
+    "bg": "#111522", "surface": "#1a2030", "surface2": "#22293b", "text": "#f7f8ff",
+    "muted": "#a8b0c7", "border": "#30384d", "primary": "#7882ff", "primary2": "#9ba2ff",
+    "success": "#35c995", "warning": "#ffb55c", "danger": "#ff7280", "shadow": "#0b0e17",
+}
+# Accent colours used by charts / cards (shared, theme-independent)
+ACCENTS = {"primary": "#626cf2", "blue": "#3b82f6", "green": "#20b486", "orange": "#f59e42", "red": "#ef5261"}
+PRIORITY_COLORS = {2: "#ef5261", 1: "#f2c94c", 0: "#27ae60", -1: "#ffffff"}
+
+
+def stylesheet(c):
+    return f"""
+    * {{ font-family: 'Cairo', 'Noto Sans Arabic', 'DejaVu Sans'; }}
+    QMainWindow, QDialog, QWidget#appRoot {{ background: {c['bg']}; color: {c['text']}; }}
+    QWidget {{ color: {c['text']}; font-size: 13px; }}
+    QFrame#card, QFrame#sidePanel, QFrame#topBar {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 16px; }}
+    QFrame#sidePanel {{ border-radius: 0px; border-top: 0; border-bottom: 0; }}
+    QLabel#brand {{ font-size: 22px; font-weight: 800; color: {c['text']}; }}
+    QLabel#brandSub, QLabel#muted, QLabel#statCaption {{ color: {c['muted']}; }}
+    QLabel#sectionTitle {{ font-size: 17px; font-weight: 800; }}
+    QLabel#focusTitle {{ font-size: 23px; font-weight: 800; }}
+    QLabel#timerText {{ font-size: 48px; font-weight: 800; }}
+    QLabel#statValue {{ font-size: 26px; font-weight: 800; }}
+    QLabel#dangerText {{ color: {c['danger']}; font-weight: 700; }}
+    QLineEdit, QTextEdit, QComboBox, QSpinBox, QDateEdit, QTimeEdit, QDateTimeEdit {{ background: {c['surface2']}; border: 1px solid {c['border']}; border-radius: 9px; padding: 8px 10px; selection-background-color: {c['primary']}; }}
+    QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDateEdit:focus, QTimeEdit:focus, QDateTimeEdit:focus {{ border: 2px solid {c['primary']}; }}
+    QComboBox {{ color: {c['text']}; background: {c['surface2']}; }}
+    QComboBox::drop-down {{ width: 28px; border: 0; background: {c['surface2']}; }}
+    QComboBox QAbstractItemView {{ color: {c['text']}; background: {c['surface']}; border: 1px solid {c['border']}; selection-background-color: {c['primary']}; selection-color: white; outline: 0; }}
+    QComboBox QAbstractItemView::item {{ min-height: 30px; padding: 5px 9px; }}
+    QComboBox:disabled {{ color: {c['muted']}; background: {c['border']}; }}
+    QDateEdit, QTimeEdit, QDateTimeEdit {{ color: {c['text']}; background: {c['surface2']}; selection-background-color: {c['primary']}; selection-color: white; }}
+    QDateEdit::drop-down, QTimeEdit::drop-down, QDateTimeEdit::drop-down {{ width: 24px; border: 0; background: {c['surface2']}; }}
+    QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{ background: {c['surface2']}; border: 0; width: 22px; }}
+    QCheckBox {{ spacing: 9px; color: {c['text']}; }}
+    QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 4px; border: 2px solid {c['muted']}; background: {c['surface2']}; }}
+    QCheckBox::indicator:hover {{ border-color: {c['primary']}; }}
+    QCheckBox::indicator:checked {{ background: {c['primary']}; border-color: {c['primary2']}; }}
+    QCheckBox::indicator:disabled {{ background: {c['border']}; border-color: {c['border']}; }}
+    QPushButton {{ background: {c['surface2']}; color: {c['text']}; border: 1px solid {c['border']}; border-radius: 9px; padding: 8px 13px; font-weight: 700; }}
+    QPushButton:hover {{ border-color: {c['primary']}; background: {c['surface']}; }}
+    QPushButton#primary {{ color: white; border: 0; background: {c['primary']}; padding: 10px 18px; }}
+    QPushButton#primary:hover {{ background: {c['primary2']}; }}
+    QPushButton#danger {{ color: {c['danger']}; background: transparent; }}
+    QPushButton#nav {{ background: transparent; border: 0; text-align: right; padding: 10px 12px; font-size: 14px; }}
+    QPushButton#nav:hover, QPushButton#nav:checked {{ background: {c['surface2']}; color: {c['primary']}; }}
+    QListWidget {{ background: transparent; border: 0; outline: 0; }}
+    QListWidget::item {{ padding: 9px; margin: 2px 0; border-radius: 8px; }}
+    QListWidget::item:selected {{ background: {c['surface2']}; color: {c['primary']}; }}
+    QTableWidget {{ background: transparent; border: 0; gridline-color: {c['border']}; alternate-background-color: {c['surface2']}; }}
+    QHeaderView::section {{ background: {c['surface2']}; color: {c['muted']}; border: 0; border-bottom: 1px solid {c['border']}; padding: 10px; font-weight: 700; }}
+    QProgressBar {{ background: {c['surface2']}; border: 0; border-radius: 4px; height: 8px; text-align: center; color: transparent; }}
+    QProgressBar::chunk {{ background: {c['primary']}; border-radius: 4px; }}
+    QCalendarWidget QWidget {{ alternate-background-color: {c['surface']}; }}
+    QCalendarWidget QAbstractItemView {{ background: {c['surface']}; color: {c['text']}; selection-background-color: {c['primary']}; border: 0; }}
+    QCalendarWidget QToolButton {{ color: {c['text']}; background: transparent; border: 0; }}
+    QMenu {{ background: {c['surface']}; border: 1px solid {c['border']}; }}
+    QStatusBar {{ background: {c['surface']}; color: {c['muted']}; }}
+    QScrollBar:vertical {{ background: transparent; width: 9px; }}
+    QScrollBar::handle:vertical {{ background: {c['border']}; border-radius: 4px; min-height: 30px; }}
+    """
+
+
+def system_is_dark(app):
+    try:
+        return app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    except Exception:
+        return app.palette().color(QPalette.Window).lightness() < 128
+
+
+def apply_theme(app, mode):
+    effective = mode
+    if mode == "system":
+        effective = "dark" if system_is_dark(app) else "light"
+    app.setStyleSheet(stylesheet(DARK if effective == "dark" else LIGHT))
+    return effective
+
+===== FILE: ./src/flow_state/ui/tray.py =====
+from PySide6.QtCore import QObject
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+
+from flow_state import APP_NAME
+from flow_state.i18n import tr
+
+
+class TrayController(QObject):
+    def __init__(self, window, timer):
+        super().__init__()
+        self.window = window
+        self.timer = timer
+        self.tray = QSystemTrayIcon()
+        self.tray.setIcon(QIcon.fromTheme("appointment-new"))
+        self.tray.setToolTip(APP_NAME)
+        menu = QMenu()
+        self.show_hide_action = QAction()
+        self.start_pause_action = QAction()
+        self.quit_action = QAction()
+        menu.addAction(self.show_hide_action)
+        menu.addAction(self.start_pause_action)
+        menu.addSeparator()
+        menu.addAction(self.quit_action)
+        self.tray.setContextMenu(menu)
+        self.menu = menu
+        self.show_hide_action.triggered.connect(self.toggle_window)
+        self.start_pause_action.triggered.connect(self.toggle_timer)
+        self.quit_action.triggered.connect(self.window.close_application)
+        self.timer.tick.connect(lambda text, _s: self.tray.setToolTip(f"{APP_NAME} | {text}"))
+        self.timer.running_changed.connect(self.update_start_pause_text)
+        self.retranslate()
+
+    def show(self):
+        self.tray.show()
+
+    def toggle_window(self):
+        if self.window.isVisible():
+            self.window.hide()
+        else:
+            self.window.show()
+            self.window.raise_()
+            self.window.activateWindow()
+        self.update_show_hide_text()
+
+    def toggle_timer(self):
+        self.timer.pause() if self.timer.is_running() else self.timer.start()
+
+    def update_start_pause_text(self, running=None):
+        running = self.timer.is_running() if running is None else running
+        self.start_pause_action.setText(tr("إيقاف") if running else tr("ابدأ"))
+
+    def update_show_hide_text(self):
+        self.show_hide_action.setText(tr("إخفاء") if self.window.isVisible() else tr("عرض"))
+
+    def retranslate(self):
+        """QAction is not a QWidget, so translate_tree() cannot reach it."""
+        self.update_show_hide_text()
+        self.update_start_pause_text()
+        self.quit_action.setText(tr("خروج"))
+
+===== FILE: ./src/flow_state/ui/widgets/__init__.py =====
+
+===== FILE: ./src/flow_state/ui/widgets/charts.py =====
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+
+from flow_state.ui.theme import ACCENTS
+
+
+class StatCard(QFrame):
+    def __init__(self, title, color):
+        super().__init__()
+        self.setObjectName("card")
+        lay = QVBoxLayout(self)
+        cap = QLabel(title)
+        cap.setObjectName("muted")
+        self.value = QLabel("0")
+        self.value.setObjectName("statValue")
+        self.value.setStyleSheet(f"color:{color};")
+        lay.addWidget(cap)
+        lay.addWidget(self.value)
+
+
+class WeeklyChart(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.values = [0] * 7
+        self.labels = [""] * 7
+        self.unit = ""
+        self.color = ACCENTS["primary"]
+        self.setMinimumHeight(250)
+
+    def set_data(self, values, labels, unit="", color=None):
+        self.values, self.labels, self.unit = list(values), list(labels), unit
+        self.color = color or ACCENTS["primary"]
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        text = self.palette().color(self.foregroundRole())
+        grid = self.palette().color(self.backgroundRole()).lighter(125)
+        w, h = self.width(), self.height()
+        base = h - 45
+        maximum = max(self.values + [1])
+        gap = w / max(1, len(self.values))
+        p.setPen(QPen(grid, 1))
+        p.drawLine(18, base, w - 18, base)
+        for i, value in enumerate(self.values):
+            bh = (base - 38) * (value / maximum)
+            rect = QRectF(i * gap + gap * .27, base - bh, gap * .46, bh)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(self.color))
+            p.drawRoundedRect(rect, 6, 6)
+            p.setPen(text)
+            shown = f"{value:g}{self.unit}" if value else "0"
+            p.drawText(QRectF(i * gap, base - bh - 24, gap, 20), Qt.AlignCenter, shown)
+            p.drawText(QRectF(i * gap, base + 8, gap, 24), Qt.AlignCenter, self.labels[i])
+
+
+class DonutChart(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.rate = 0
+        self.caption = "إنجاز"
+        self.color = ACCENTS["green"]
+        self.setMinimumHeight(230)
+
+    def set_data(self, rate, caption, color):
+        self.rate = max(0, min(100, float(rate)))
+        self.caption, self.color = caption, color
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        side = max(30, min(self.width(), self.height()) - 58)
+        rect = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+        track = self.palette().color(self.backgroundRole()).lighter(130)
+        text = self.palette().color(self.foregroundRole())
+        p.setPen(QPen(track, 18, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, 0, 360 * 16)
+        p.setPen(QPen(QColor(self.color), 18, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, 90 * 16, -int(360 * 16 * self.rate / 100))
+        p.setPen(text)
+        p.drawText(rect, Qt.AlignCenter, f"{round(self.rate)}%\n{self.caption}")
+
+===== FILE: ./src/flow_state/ui/widgets/folder_panel.py =====
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QHBoxLayout, QInputDialog, QListWidget, QMessageBox, QPushButton, QVBoxLayout, QWidget
+
+from flow_state.i18n import tr, translate_tree
+
+
+class FolderPanel(QWidget):
+    folder_selected = Signal(int)
+    folders_changed = Signal()
+
+    def __init__(self, services):
+        super().__init__()
+        self.folders = services.folders
+        self.setObjectName("folderPanel")
+        self.folder_ids = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 18, 14, 14)
+        layout.setSpacing(10)
+        self.list_widget = QListWidget()
+        layout.addWidget(self.list_widget)
+        buttons = QHBoxLayout()
+        self.add_button = QPushButton("＋ جديد")
+        self.delete_button = QPushButton("حذف")
+        self.add_button.setObjectName("primary")
+        self.delete_button.setObjectName("danger")
+        buttons.addWidget(self.add_button)
+        buttons.addWidget(self.delete_button)
+        layout.addLayout(buttons)
+        self.add_button.clicked.connect(self.add_folder)
+        self.delete_button.clicked.connect(self.delete_folder)
+        self.list_widget.currentRowChanged.connect(self.on_current_row_changed)
+        self.reload()
+
+    def reload(self):
+        self.list_widget.clear()
+        self.folder_ids = []
+        for folder in self.folders.list():
+            self.folder_ids.append(folder["id"])
+            self.list_widget.addItem(folder["name"])
+        if self.folder_ids and self.list_widget.currentRow() == -1:
+            self.list_widget.setCurrentRow(0)
+        translate_tree(self)
+
+    def current_folder_id(self):
+        row = self.list_widget.currentRow()
+        return self.folder_ids[row] if 0 <= row < len(self.folder_ids) else None
+
+    def on_current_row_changed(self, row):
+        if 0 <= row < len(self.folder_ids):
+            self.folder_selected.emit(self.folder_ids[row])
+
+    def add_folder(self):
+        name, ok = QInputDialog.getText(self, tr("إضافة مجلد"), tr("اسم المجلد:"))
+        if ok and name.strip():
+            self.folders.add(name)
+            self.reload()
+            self.folders_changed.emit()
+
+    def delete_folder(self):
+        folder_id = self.current_folder_id()
+        if folder_id is None:
+            return
+        reply = QMessageBox.question(self, tr("حذف المجلد"), tr("هل تريد حذف هذا المجلد وكل مهامه؟"),
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.folders.delete(folder_id)
+            self.reload()
+            self.folders_changed.emit()
+
+===== FILE: ./src/flow_state/ui/widgets/task_list.py =====
+from PySide6.QtCore import QDate, Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+                               QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+
+from flow_state.i18n import tr, translate_tree
+from flow_state.ui.dialogs.choose_task_dialog import ChooseTaskDialog
+from flow_state.ui.dialogs.task_edit_dialog import TaskEditDialog
+from flow_state.ui.formatting import PRIORITY_CHOICES, format_range, format_sessions, priority_label
+from flow_state.ui.theme import PRIORITY_COLORS
+
+COLUMNS = ["تم", "المهمة", "الموعد", "الأولوية", "الدورات", "تركيز", "تعديل", "حذف"]
+COL_DONE, COL_TITLE, COL_RANGE, COL_PRIORITY, COL_SESSIONS, COL_FOCUS, COL_EDIT, COL_DELETE = range(len(COLUMNS))
+SMART_FILTERS = {"today": "مهام اليوم", "upcoming": "المهام القادمة", "overdue": "المهام المتأخرة",
+                 "completed": "المهام المكتملة"}
+
+
+class TaskList(QWidget):
+    task_changed = Signal()
+    current_task_changed = Signal()
+
+    def __init__(self, services, compact=False):
+        super().__init__()
+        self.services = services
+        self.tasks = services.tasks
+        self.folder_id = None
+        self.priority_filter = None
+        self.date_filter = None
+        self.selected_date = None
+        self.row_task_ids = {}
+        self.show_completed = False
+        self.compact = compact
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        if not compact:
+            self._build_toolbar(layout)
+        self.table = QTableWidget(0, len(COLUMNS))
+        self.table.setHorizontalHeaderLabels(COLUMNS)
+        self.table.horizontalHeader().setSectionsMovable(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(44)
+        layout.addWidget(self.table)
+        self.table.itemChanged.connect(self.item_changed)
+        self.table.cellDoubleClicked.connect(
+            lambda r, c: self.edit_task(self.row_task_ids[r]) if r in self.row_task_ids else None)
+        self.apply_column_mode()
+
+    def _build_toolbar(self, layout):
+        add = QHBoxLayout()
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("اكتب اسم المهمة ثم اضغط إضافة...")
+        self.priority_input = QComboBox()
+        for t, v in PRIORITY_CHOICES:
+            self.priority_input.addItem(t, v)
+        self.add_button = QPushButton("＋ إضافة مهمة")
+        self.add_button.setObjectName("primary")
+        add.addWidget(self.title_input, 1)
+        add.addWidget(self.priority_input)
+        add.addWidget(self.add_button)
+        layout.addLayout(add)
+
+        filters = QHBoxLayout()
+        self.filter_label = QLabel("كل المهام")
+        self.filter_label.setObjectName("sectionTitle")
+        self.priority_filter_combo = QComboBox()
+        for t, v in [("كل الأولويات", None), ("عالية", 2), ("متوسطة", 1), ("منخفضة", 0), ("غير محددة", -1)]:
+            self.priority_filter_combo.addItem(t, v)
+        self.today_button = QPushButton("مهام اليوم")
+        self.all_button = QPushButton("كل المهام")
+        filters.addWidget(self.filter_label)
+        filters.addStretch()
+        filters.addWidget(self.priority_filter_combo)
+        filters.addWidget(self.today_button)
+        filters.addWidget(self.all_button)
+        layout.addLayout(filters)
+
+        self.add_button.clicked.connect(self.add_task)
+        self.title_input.returnPressed.connect(self.add_task)
+        self.priority_filter_combo.currentIndexChanged.connect(self.priority_changed)
+        self.today_button.clicked.connect(lambda: self.set_smart_filter("today"))
+        self.all_button.clicked.connect(self.show_all)
+
+    # ------------------------------------------------------------ filters
+    def set_folder(self, folder_id):
+        self.folder_id, self.date_filter, self.selected_date = folder_id, None, None
+        self.reload_tasks()
+
+    def show_all(self):
+        self.folder_id, self.date_filter, self.selected_date = None, None, None
+        self.filter_label.setText(tr("كل المهام"))
+        self.reload_tasks()
+
+    def set_smart_filter(self, name):
+        self.folder_id, self.date_filter, self.selected_date = None, name, None
+        self.filter_label.setText(tr(SMART_FILTERS.get(name, "كل المهام")))
+        self.reload_tasks()
+
+    def set_selected_date(self, date):
+        self.folder_id, self.date_filter = None, None
+        self.selected_date = date.toString("yyyy-MM-dd")
+        self.reload_tasks()
+
+    def priority_changed(self):
+        self.priority_filter = self.priority_filter_combo.currentData()
+        self.reload_tasks()
+
+    # ----------------------------------------------------------- commands
+    def open_add_dialog(self, default_date=None):
+        folder_id = self.folder_id or self.services.folders.default_id()
+        if folder_id is None:
+            QMessageBox.warning(self, tr("لا يوجد مشروع"), tr("أنشئ مشروعًا أولًا."))
+            return
+        dialog = TaskEditDialog(parent=self, default_date=default_date)
+        if not self.compact:
+            dialog.title_input.setText(self.title_input.text())
+            dialog.priority_combo.setCurrentIndex(self.priority_input.currentIndex())
+        if dialog.exec() == QDialog.Accepted:
+            self.tasks.create(folder_id, dialog.data())
+            if not self.compact:
+                self.title_input.clear()
+            self.reload_tasks()
+            self.task_changed.emit()
+
+    def add_task(self):
+        self.open_add_dialog(QDate.fromString(self.selected_date, "yyyy-MM-dd") if self.selected_date else None)
+
+    def edit_task(self, task_id):
+        dialog = TaskEditDialog(self.tasks.get(task_id), self)
+        if dialog.exec() == QDialog.Accepted:
+            self.tasks.update(task_id, dialog.data())
+            self._changed(current_too=True)
+
+    def delete_task(self, task_id):
+        if QMessageBox.question(self, tr("حذف المهمة"), tr("هل تريد حذف هذه المهمة؟"),
+                                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self.tasks.delete(task_id)
+            self._changed(current_too=True)
+
+    def set_current_task(self, task_id):
+        self.tasks.set_current(task_id)
+        self.reload_tasks()
+        self.current_task_changed.emit()
+
+    def choose_current_task(self):
+        rows = self.tasks.incomplete()
+        if not rows:
+            QMessageBox.information(self, tr("لا توجد مهام"), tr("أضف مهمة غير مكتملة أولًا."))
+            return
+        task_id = ChooseTaskDialog.ask(rows, "تغيير المهمة الحالية", "اختر المهمة التي تريد التركيز عليها:", self)
+        if task_id is not None:
+            self.set_current_task(task_id)
+
+    def item_changed(self, item):
+        if item.column() == COL_DONE and item.row() in self.row_task_ids:
+            self.tasks.set_completed(self.row_task_ids[item.row()], item.checkState() == Qt.Checked)
+            self._changed()
+
+    def _changed(self, current_too=False):
+        self.reload_tasks()
+        self.task_changed.emit()
+        if current_too:
+            self.current_task_changed.emit()
+
+    def toggle_completed(self):
+        self.show_completed = not self.show_completed
+        self.reload_tasks()
+
+    # ------------------------------------------------------------- render
+    def reload_tasks(self):
+        self.table.blockSignals(True)
+        self.table.clearSpans()
+        self.table.setRowCount(0)
+        self.row_task_ids = {}
+        args = (self.folder_id, self.priority_filter, self.date_filter, self.selected_date)
+        active = self.tasks.list(*args, completed=False)
+        completed = self.tasks.list(*args, completed=True)
+        row = 0
+        for task in active:
+            self._add_task_row(row, task)
+            row += 1
+        if completed:
+            self.table.insertRow(row)
+            self.table.setSpan(row, 0, 1, len(COLUMNS))
+            toggle = QPushButton(("▲ " + tr("إخفاء") if self.show_completed else "▼ " + tr("عرض"))
+                                 + f" {tr('المهام المكتملة')} ({len(completed)})")
+            toggle.setObjectName("nav")
+            toggle.clicked.connect(self.toggle_completed)
+            self.table.setCellWidget(row, 0, toggle)
+            self.table.setRowHeight(row, 42)
+            row += 1
+            if self.show_completed:
+                for task in completed:
+                    self._add_task_row(row, task)
+                    row += 1
+        if not active and not completed:
+            self.table.setRowCount(1)
+            empty = QTableWidgetItem(tr("لا توجد مهام في هذا العرض."))
+            empty.setTextAlignment(Qt.AlignCenter)
+            self.table.setSpan(0, 0, 1, len(COLUMNS))
+            self.table.setItem(0, 0, empty)
+        self.table.blockSignals(False)
+        translate_tree(self)
+
+    def _add_task_row(self, row, task):
+        self.table.insertRow(row)
+        tid = task["id"]
+        self.row_task_ids[row] = tid
+        done = QTableWidgetItem()
+        done.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+        done.setCheckState(Qt.Checked if task["completed"] else Qt.Unchecked)
+        self.table.setItem(row, COL_DONE, done)
+        title = QTableWidgetItem(task["title"])
+        if task["completed"]:
+            title.setForeground(QColor("gray"))
+            font = title.font()
+            font.setStrikeOut(True)
+            title.setFont(font)
+        self.table.setItem(row, COL_TITLE, title)
+        self.table.setItem(row, COL_RANGE, QTableWidgetItem(format_range(task)))
+        priority = QTableWidgetItem(tr(priority_label(task["priority"])))
+        priority.setForeground(QColor(PRIORITY_COLORS.get(task["priority"], "#ffffff")))
+        self.table.setItem(row, COL_PRIORITY, priority)
+        self.table.setItem(row, COL_SESSIONS, QTableWidgetItem(format_sessions(task)))
+        focus = QPushButton(tr("الحالية") if task["is_current"] else tr("اختيار"))
+        focus.setEnabled(not task["is_current"] and not task["completed"])
+        focus.clicked.connect(lambda _=False, t=tid: self.set_current_task(t))
+        self.table.setCellWidget(row, COL_FOCUS, focus)
+        edit = QPushButton(tr("تعديل"))
+        edit.clicked.connect(lambda _=False, t=tid: self.edit_task(t))
+        self.table.setCellWidget(row, COL_EDIT, edit)
+        delete = QPushButton(tr("حذف"))
+        delete.setObjectName("danger")
+        delete.clicked.connect(lambda _=False, t=tid: self.delete_task(t))
+        self.table.setCellWidget(row, COL_DELETE, delete)
+
+    # ------------------------------------------------------------ columns
+    def apply_column_mode(self):
+        settings = self.services.settings
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        if settings.get("auto_columns", "1") == "1":
+            for col in range(self.table.columnCount()):
+                header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(COL_TITLE, QHeaderView.Stretch)
+            return
+        for col in range(self.table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+        raw = settings.get("task_column_widths", "")
+        if raw:
+            try:
+                for col, width in enumerate(int(x) for x in raw.split(",")):
+                    if col < self.table.columnCount():
+                        self.table.setColumnWidth(col, max(35, width))
+            except ValueError:
+                pass
+
+    def save_column_widths(self):
+        if self.services.settings.get("auto_columns", "1") == "0":
+            widths = ",".join(str(self.table.columnWidth(i)) for i in range(self.table.columnCount()))
+            self.services.settings.set("task_column_widths", widths)
+
+===== FILE: ./src/flow_state/ui/widgets/timer_ring.py =====
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QWidget
+
+
+class TimerRing(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.progress = 1.0
+        self.setMinimumSize(250, 250)
+
+    def set_progress(self, value):
+        self.progress = max(0.0, min(1.0, value))
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        side = min(self.width(), self.height()) - 24
+        rect = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+        p.setPen(QPen(QColor("#dfe3f4"), 10, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, 0, 360 * 16)
+        p.setPen(QPen(QColor("#626cf2"), 10, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, 90 * 16, -int(360 * 16 * self.progress))
+
+===== FILE: ./tests/conftest.py =====
+import pytest
+
+from flow_state.data.database import Database
+from flow_state.services import AppServices
+
+
+@pytest.fixture
+def services():
+    s = AppServices(Database(":memory:"))
+    yield s
+    s.close()
+
+===== FILE: ./tests/test_database.py =====
+import sqlite3
+
+from flow_state.data.database import Database
+from flow_state.data.migrations import current_version
+from flow_state.services.task_service import TaskData
+
+
+def test_fresh_database_is_fully_migrated():
+    db = Database(":memory:")
+    assert current_version(db.conn) == 2
+    assert db.get_folders()[0]["name"] == "Inbox"
+
+
+def test_v1_database_upgrades_without_data_loss(tmp_path):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE folders (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+    conn.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, folder_id INTEGER, title TEXT NOT NULL,"
+                 " priority INTEGER DEFAULT 0, completed INTEGER DEFAULT 0, is_current INTEGER DEFAULT 0,"
+                 " notes TEXT DEFAULT '', due_at TEXT)")
+    conn.execute("INSERT INTO folders VALUES (1, 'Work')")
+    conn.execute("INSERT INTO tasks (folder_id, title, due_at) VALUES (1, 'old task', '2026-01-01T10:00:00')")
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    task = db.get_tasks()[0]
+    assert task["title"] == "old task"
+    assert task["start_at"] == "2026-01-01T10:00:00"
+    assert task["parent_id"] is None
+
+
+def test_delete_task_removes_focus_history(services):
+    tid = services.tasks.create(services.folders.default_id(), TaskData("t", estimated_sessions=2))
+    services.focus.record(tid, 1.0, 1500)
+    services.tasks.delete(tid)
+    assert services.analytics.summary()["elapsed_minutes"] == 0
+
+===== FILE: ./tests/test_i18n.py =====
+from flow_state import i18n
+
+
+def test_all_languages_load():
+    assert len(i18n.LANGUAGES) >= 12
+    assert "ar" in i18n.RTL and "en" not in i18n.RTL
+
+
+def test_repeated_switching_never_stacks():
+    for code in ("en", "fr", "de", "ja", "ar", "ko"):
+        i18n.set_language(code)
+        text = i18n.translate_text("▶ " + i18n.tr("ابدأ"))
+        assert text == "▶ " + i18n.tr("ابدأ")
+    i18n.set_language("ar")
+
+
+def test_every_language_pack_is_well_formed():
+    for code, pack in i18n.PACKS.items():
+        assert pack.CODE == code
+        assert isinstance(pack.MESSAGES, dict)
+        assert pack.QT_LOCALE
+
+
+def test_report_missing_translations(capsys):
+    """Not a failure: prints which English keys each language still lacks."""
+    english = set(i18n.PACKS["en"].MESSAGES.values())
+    for code, pack in i18n.PACKS.items():
+        if code in ("ar", "en"):
+            continue
+        missing = english - set(pack.MESSAGES)
+        print(f"{code}: {len(missing)} missing (fall back to English)")
+
+===== FILE: ./tests/test_scoring.py =====
+from flow_state.core.scoring import DefaultScoringPolicy, FullSessionsOnlyPolicy, get_policy
+
+
+def test_fraction_is_clamped_and_rounded():
+    p = DefaultScoringPolicy()
+    assert p.session_fraction(750, 1500) == 0.5
+    assert p.session_fraction(3000, 1500) == 1.0
+    assert p.session_fraction(10, 0) == 0.0
+
+
+def test_default_reward_is_proportional():
+    r = DefaultScoringPolicy().evaluate_session(0.5, 1500)
+    assert (r.fraction, r.focus_seconds, r.reward) == (0.5, 750, 0.5)
+
+
+def test_full_sessions_only_policy():
+    p = FullSessionsOnlyPolicy()
+    assert p.evaluate_session(0.9, 1500).reward == 0.0
+    assert p.evaluate_session(1.0, 1500).reward == 1.0
+    assert p.evaluate_session(0.9, 1500).focus_seconds == 1350  # real focus still counted
+
+
+def test_unknown_policy_falls_back_to_default():
+    assert get_policy("nope").name == "default"
+
+===== FILE: ./tests/test_services.py =====
+from flow_state.services.task_service import TaskData
+
+
+def test_statistics_scenario_from_regression_report(services):
+    folder = services.folders.default_id()
+    est = services.tasks.create(folder, TaskData("estimated", estimated_sessions=4))
+    free = services.tasks.create(folder, TaskData("free"))
+    services.focus.record(est, 1.0, 1500)
+    services.focus.record(free, 1.0, 1500)
+    services.tasks.set_completed(est, True)
+    services.tasks.delete(free)
+    s = services.analytics.summary()
+    assert (s["total_tasks"], s["done_tasks"], s["task_rate"]) == (1, 1, 100)
+    assert s["total_minutes"] == 100
+    assert s["elapsed_minutes"] == 25
+    assert s["remaining_minutes"] == 75
+    assert s["time_rate"] == 25
+    assert sum(d["focus_minutes"] for d in services.analytics.weekly()) == 25
+
+
+def test_partial_session_reward(services):
+    tid = services.tasks.create(services.folders.default_id(), TaskData("t"))
+    services.focus.record(tid, 0.5, 1500)
+    assert services.tasks.get(tid)["completed_sessions"] == 0.5
+
+
+def test_remaining_seconds(services):
+    tid = services.tasks.create(services.folders.default_id(), TaskData("t", estimated_sessions=2))
+    services.focus.record(tid, 1.0, 1500)
+    assert services.focus.remaining_seconds(services.tasks.get(tid), live_seconds=100) == 1400
+
+
+def test_subtasks_are_hidden_from_main_list(services):
+    parent = services.tasks.create(services.folders.default_id(), TaskData("parent"))
+    services.tasks.add_subtask(parent, "child 1")
+    child2 = services.tasks.add_subtask(parent, "child 2")
+    services.tasks.set_completed(child2, True)
+    assert [t["title"] for t in services.tasks.list()] == ["parent"]
+    assert services.tasks.subtask_progress(parent) == (1, 2)
+    services.tasks.delete(parent)
+    assert services.tasks.subtasks(parent) == []
+
+
+def test_reopening_task_clears_completion_date(services):
+    tid = services.tasks.create(services.folders.default_id(), TaskData("t"))
+    services.tasks.set_completed(tid, True)
+    services.tasks.set_completed(tid, False)
+    assert services.tasks.get(tid)["completed_at"] is None
+
+===== FILE: ./tests/test_timer.py =====
+import pytest
+
+pytest.importorskip("PySide6")
+
+from flow_state.core.timer import PomodoroTimer  # noqa: E402
+
+
+def test_finish_early_emits_fraction():
+    t = PomodoroTimer({"work_duration": 10})
+    got = []
+    t.period_ended.connect(lambda mode, f: got.append((mode, f)))
+    t.remaining_seconds = 300
+    t.finish_early()
+    assert got == [("work", 0.5)]
+    assert t.mode == "short_break"
+
+
+def test_long_break_after_n_sessions():
+    t = PomodoroTimer({"sessions_before_long_break": 2})
+    t._move_to_next_period(True)
+    t.set_mode("work")
+    t._move_to_next_period(True)
+    assert t.mode == "long_break"
